@@ -65,7 +65,7 @@ python gui.py
 本项目的模型能力建立在以下优秀开源项目之上，感谢原作者与社区：
 
 - [STTN (Spatial-Temporal Transformer Network)](https://github.com/researchmm/STTN)
-- [E2FGVI (End-to-End Framework for Video Inpainting)](https://github.com/ML-GSAI/E2FGVI)
+- [E2FGVI (End-to-End Framework for Video Inpainting)](https://github.com/MCG-NKU/E2FGVI)
 - [ProPainter](https://github.com/sczhou/ProPainter)
 
 ## 使用声明

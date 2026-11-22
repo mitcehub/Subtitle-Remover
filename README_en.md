@@ -67,7 +67,7 @@ This project builds upon the following excellent open-source projects. Thanks to
 authors and communities:
 
 - [STTN (Spatial-Temporal Transformer Network)](https://github.com/researchmm/STTN)
-- [E2FGVI (End-to-End Framework for Video Inpainting)](https://github.com/ML-GSAI/E2FGVI)
+- [E2FGVI (End-to-End Framework for Video Inpainting)](https://github.com/MCG-NKU/E2FGVI)
 - [ProPainter](https://github.com/sczhou/ProPainter)
 
 ## Usage Notice
