@@ -1,3 +1,5 @@
+"""主工作页：视频预览、选区、播放控制、时间轴、任务执行。"""
+
 import os
 import cv2
 import queue
@@ -8,15 +10,18 @@ import types
 from pathlib import Path
 from datetime import datetime
 
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QFrame, QTextEdit
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QSplitter
 from PyQt6.QtCore import pyqtSlot, pyqtSignal, Qt, QTimer
 from PyQt6 import QtWidgets, QtGui
-from qfluentwidgets import (PushButton, CardWidget, TextEdit, FluentIcon, PrimaryPushButton, ToolButton)
 
-from ui.setting_interface import SettingInterface
 from ui.component.video_display_component import VideoDisplayComponent
 from ui.component.timeline_widget import TimelineWidget
-from ui.icon.my_fluent_icon import MyFluentIcon
+from ui.widgets.button import (PrimaryButton, SecondaryButton, GhostButton,
+                               IconButton, set_active)
+from ui.widgets.card import Card
+from ui.widgets.field import ComboBoxField, SwitchField
+from ui.widgets.log_view import LogView
+from ui.widgets import icons
 from ui.playback_controller import PlaybackController
 from app.pipeline import ProcessingPipeline
 from infra.config import config, tr
@@ -29,7 +34,8 @@ from ui.preview_decoder import PreviewDecoder
 logger = logging.getLogger(__name__)
 
 
-class HomeInterface(QWidget):
+class HomePage(QWidget):
+    hardware_changed = pyqtSignal()
     progress_signal = pyqtSignal(int, bool)
     append_log_signal = pyqtSignal(list)
     update_preview_with_comp_signal = pyqtSignal(list)
@@ -44,7 +50,6 @@ class HomeInterface(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
-        self.setObjectName("HomeInterface")
         self.video_path = None
         self.output_path = None
         self.video_cap = None
@@ -58,7 +63,6 @@ class HomeInterface(QWidget):
         self._has_processed = False
         self._processing_finished_called = False
 
-        self.auto_scroll = True
         self._stop_event = threading.Event()
         self._worker_thread = None
         # 任务代号：每次开始/停止自增，用于丢弃旧任务迟到的回调
@@ -81,6 +85,8 @@ class HomeInterface(QWidget):
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
+
+    # ==================== 界面搭建 ====================
 
     def __init_widgets(self):
         main_layout = QHBoxLayout(self)
@@ -106,62 +112,49 @@ class HomeInterface(QWidget):
         self._shortcut_space = QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Space), self)
         self._shortcut_space.activated.connect(self._toggle_playback)
 
-        # 控制栏：时间码 | 播放控制居中 | 显示模式 | 视图模式
+        # 控制栏：时间码 | 播放控制居中 | 显示模式
         control_bar = QWidget()
         control_layout = QHBoxLayout(control_bar)
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(4)
 
-        self.time_label = QtWidgets.QLabel('00:00:00 / 00:00:00')
-        self.time_label.setStyleSheet('color: #aaa; font-size: 12px;')
+        self.time_label = QtWidgets.QLabel('00:00:00 / 00:00:00', objectName='Timecode')
         self.time_label.setFixedWidth(180)
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         control_layout.addWidget(self.time_label)
 
         control_layout.addStretch()
 
-        self.jump_start_btn = ToolButton(MyFluentIcon.SkipStart, self)
-        self.jump_start_btn.setToolTip(tr['Main']['JumpToStart'])
+        self.jump_start_btn = IconButton('skip_start', tr['Main']['JumpToStart'], self)
         self.jump_start_btn.setEnabled(False)
-        self.jump_start_btn.setFixedWidth(32)
         control_layout.addWidget(self.jump_start_btn)
 
-        self.prev_btn = ToolButton(MyFluentIcon.PrevFrame, self)
-        self.prev_btn.setToolTip(tr['Main']['PreviousFrame'])
+        self.prev_btn = IconButton('prev', tr['Main']['PreviousFrame'], self)
         self.prev_btn.setEnabled(False)
-        self.prev_btn.setFixedWidth(32)
         control_layout.addWidget(self.prev_btn)
 
-        self.play_btn = ToolButton(FluentIcon.PLAY, self)
-        self.play_btn.setToolTip(tr['Main']['Play'])
+        self.play_btn = IconButton('play', tr['Main']['Play'], self)
         self.play_btn.setEnabled(False)
-        self.play_btn.setFixedWidth(32)
         control_layout.addWidget(self.play_btn)
 
-        self.speed_btn = ToolButton(MyFluentIcon.Speed1x, self)
-        self.speed_btn.setToolTip(tr['Main']['PlaySpeed'])
+        self.speed_btn = IconButton('speed', tr['Main']['PlaySpeed'], self)
         self.speed_btn.setEnabled(False)
-        self.speed_btn.setFixedWidth(32)
         control_layout.addWidget(self.speed_btn)
 
-        self.next_btn = ToolButton(MyFluentIcon.NextFrame, self)
-        self.next_btn.setToolTip(tr['Main']['NextFrame'])
+        self.next_btn = IconButton('next', tr['Main']['NextFrame'], self)
         self.next_btn.setEnabled(False)
-        self.next_btn.setFixedWidth(32)
         control_layout.addWidget(self.next_btn)
 
-        self.jump_end_btn = ToolButton(MyFluentIcon.SkipEnd, self)
-        self.jump_end_btn.setToolTip(tr['Main']['JumpToEnd'])
+        self.jump_end_btn = IconButton('skip_end', tr['Main']['JumpToEnd'], self)
         self.jump_end_btn.setEnabled(False)
-        self.jump_end_btn.setFixedWidth(32)
         control_layout.addWidget(self.jump_end_btn)
 
         control_layout.addStretch()
 
         # 显示模式
-        self.fit_btn = PushButton(tr['Main']['FitView'], self)
+        self.fit_btn = GhostButton(tr['Main']['FitView'], parent=self)
+        self.fill_btn = GhostButton(tr['Main']['FillView'], parent=self)
         self.fit_btn.setEnabled(False)
-        self.fill_btn = PushButton(tr['Main']['FillView'], self)
         self.fill_btn.setEnabled(False)
         control_layout.addWidget(self.fit_btn)
         control_layout.addWidget(self.fill_btn)
@@ -170,11 +163,12 @@ class HomeInterface(QWidget):
         self.fill_btn.clicked.connect(lambda: self.set_display_mode(self.DISPLAY_FILL))
 
         # 播放控制图标缓存（供 PlaybackController 使用）
-        self._play_icon = FluentIcon.PLAY
-        self._pause_icon = FluentIcon.PAUSE
-        self._speed1x_icon = MyFluentIcon.Speed1x
-        self._speed2x_icon = MyFluentIcon.Speed2x
-        self._speed4x_icon = MyFluentIcon.Speed4x
+        self._play_icon = icons.icon('play', 18)
+        self._pause_icon = icons.icon('pause', 18)
+        self._speed1x_icon = icons.speed_icon(1, 18)
+        self._speed2x_icon = icons.speed_icon(2, 18)
+        self._speed4x_icon = icons.speed_icon(4, 18)
+        self.speed_btn.setIcon(self._speed1x_icon)
 
         self.jump_start_btn.clicked.connect(lambda: self._playback.jump_to_start())
         self.prev_btn.clicked.connect(lambda: self._playback.step_backward())
@@ -184,10 +178,14 @@ class HomeInterface(QWidget):
         self.jump_end_btn.clicked.connect(lambda: self._playback.jump_to_end())
 
         # 键盘快捷键
-        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Home), self).activated.connect(lambda: self._playback.jump_to_start())
-        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_End), self).activated.connect(lambda: self._playback.jump_to_end())
-        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_I), self).activated.connect(self._jump_to_in_point)
-        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_O), self).activated.connect(self._jump_to_out_point)
+        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Home), self).activated.connect(
+            lambda: self._playback.jump_to_start())
+        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_End), self).activated.connect(
+            lambda: self._playback.jump_to_end())
+        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_I), self).activated.connect(
+            self._jump_to_in_point)
+        QtGui.QShortcut(QtGui.QKeySequence(Qt.Key.Key_O), self).activated.connect(
+            self._jump_to_out_point)
 
         center_layout.addWidget(control_bar)
 
@@ -196,7 +194,6 @@ class HomeInterface(QWidget):
         self.timeline.frame_selected.connect(self._on_timeline_frame_selected)
         self.timeline.preview_seek.connect(self._on_preview_seek)
         self.timeline.track_range_changed.connect(self._on_track_range_changed)
-        # 不持久化轨道数据到配置文件，开新视频时自动清空
         center_layout.addWidget(self.timeline, 0)
 
         self._preview_poll_timer = QTimer(self)
@@ -208,47 +205,57 @@ class HomeInterface(QWidget):
         right_panel.setMinimumWidth(300)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 0, 0, 0)
-        right_layout.setSpacing(8)
+        right_layout.setSpacing(10)
 
-        # 基础设置
-        settings_container = CardWidget(self)
-        self.setting_interface = SettingInterface(settings_container)
-        settings_container.setLayout(self.setting_interface)
-        right_layout.addWidget(settings_container)
+        # 处理设置
+        settings_card = Card('处理设置')
+        mode_labels = []
+        if tr.has_section('InpaintMode'):
+            mode_labels = list(tr['InpaintMode'].values())
+        options = list(config.inpaintMode.validator.options)
+        labels = [mode_labels[i] if i < len(mode_labels) else str(opt.value)
+                  for i, opt in enumerate(options)]
+        self.inpaint_field = ComboBoxField(
+            tr['SubtitleExtractorGUI']['InpaintMode'], config.inpaintMode, labels)
+        self.inpaint_field.setToolTip(tr['SubtitleExtractorGUI']['InpaintModeDesc'])
+
+        self.hw_field = SwitchField(
+            tr['Setting']['HardwareAcceleration'], config.hardwareAcceleration,
+            tr['Setting']['HardwareAccelerationDesc'])
+        self.hardware_switch = self.hw_field.switch
+        self.hardware_switch.toggled.connect(lambda _: self.hardware_changed.emit())
+
+        settings_card.add(self.inpaint_field)
+        settings_card.add(self.hw_field)
+        right_layout.addWidget(settings_card)
 
         # 输出日志
-        self.output_text = TextEdit()
-        self.output_text.setReadOnly(True)
-        self.output_text.setMinimumHeight(80)
-        self.output_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.output_text.document().setDocumentMargin(4)
-        self.output_text.setStyleSheet("background: transparent; border: none;")
-        self.output_text.verticalScrollBar().valueChanged.connect(self._on_scroll_change)
-        right_layout.addWidget(self.output_text, 1)
+        log_card = Card('输出日志')
+        self.output_text = LogView()
+        log_card.add(self.output_text, 1)
+        right_layout.addWidget(log_card, 1)
 
         # 操作按钮
-        action_card = CardWidget(self)
-        action_layout = QHBoxLayout(action_card)
-        action_layout.setContentsMargins(12, 10, 12, 10)
-        action_layout.setSpacing(6)
+        action_card = Card(margins=(12, 10, 12, 10))
+        action_layout = QHBoxLayout()
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(8)
 
-        self.file_button = PushButton(tr['SubtitleExtractorGUI']['Open'], self)
-        self.file_button.setIcon(FluentIcon.FOLDER)
+        self.file_button = SecondaryButton(tr['SubtitleExtractorGUI']['Open'], 'folder')
         self.file_button.clicked.connect(self.open_file)
         self.file_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         action_layout.addWidget(self.file_button)
 
-        self.run_button = PrimaryPushButton(tr['SubtitleExtractorGUI']['Run'], self)
-        self.run_button.setIcon(FluentIcon.PLAY)
+        self.run_button = PrimaryButton(tr['SubtitleExtractorGUI']['Run'], 'play')
         self.run_button.clicked.connect(self.run_button_clicked)
         action_layout.addWidget(self.run_button)
 
-        self.stop_button = PushButton(tr['SubtitleExtractorGUI']['Stop'], self)
-        self.stop_button.setIcon(MyFluentIcon.Stop)
+        self.stop_button = SecondaryButton(tr['SubtitleExtractorGUI']['Stop'], 'stop')
         self.stop_button.setVisible(False)
         self.stop_button.clicked.connect(self.stop_button_clicked)
         action_layout.addWidget(self.stop_button)
 
+        action_card.add_layout(action_layout)
         right_layout.addWidget(action_card)
 
         # ============ 双栏 QSplitter（中栏 + 右栏） ============
@@ -260,7 +267,7 @@ class HomeInterface(QWidget):
         self.splitter.setSizes([900, 220])
         self.splitter.setCollapsible(0, False)
         self.splitter.setCollapsible(1, False)
-        self.splitter.setHandleWidth(4)
+        self.splitter.setHandleWidth(6)
 
         main_layout.addWidget(self.splitter, 1)
 
@@ -270,6 +277,7 @@ class HomeInterface(QWidget):
         if fps <= 0 or total_frames <= 0:
             return
         fps_int = max(1, int(round(fps)))
+
         def tc(fn):
             fn_0 = max(0, min(fn - 1, (total_frames or 1) - 1))
             sec = fn_0 // fps_int
@@ -279,6 +287,7 @@ class HomeInterface(QWidget):
             if h > 0:
                 return f'{h:02d}:{m:02d}:{s:02d}:{fr:02d}'
             return f'{m:02d}:{s:02d}:{fr:02d}'
+
         self.time_label.setText(f'{tc(frame_num)} / {tc(total_frames)}')
 
     # ==================== 模式切换 ====================
@@ -291,14 +300,11 @@ class HomeInterface(QWidget):
         self.fit_btn.setEnabled(enabled)
         self.fill_btn.setEnabled(enabled)
         if enabled:
-            active_s = 'QPushButton { background: #409eff; color: white; border: none; border-radius: 4px; padding: 4px 8px; }'
-            inactive_s = 'QPushButton { background: transparent; color: #ccc; border: none; border-radius: 4px; padding: 4px 8px; }'
-            self.fit_btn.setStyleSheet(active_s if self.display_mode == self.DISPLAY_FIT else inactive_s)
-            self.fill_btn.setStyleSheet(active_s if self.display_mode == self.DISPLAY_FILL else inactive_s)
+            set_active(self.fit_btn, self.display_mode == self.DISPLAY_FIT)
+            set_active(self.fill_btn, self.display_mode == self.DISPLAY_FILL)
         else:
-            s = 'QPushButton { background: transparent; color: #666; border: none; border-radius: 4px; padding: 4px 8px; }'
-            self.fit_btn.setStyleSheet(s)
-            self.fill_btn.setStyleSheet(s)
+            set_active(self.fit_btn, False)
+            set_active(self.fill_btn, False)
 
     def reset_processed_state(self):
         self._has_processed = False
@@ -306,7 +312,7 @@ class HomeInterface(QWidget):
         self._last_comp_frame = None
         self.output_path = None
         self._playback._playback_speed = 1
-        self.speed_btn.setIcon(MyFluentIcon.Speed1x)
+        self.speed_btn.setIcon(self._speed1x_icon)
         self.speed_btn.setToolTip(tr['Main']['PlaySpeed'])
         if self.output_cap:
             self.output_cap.release()
@@ -316,8 +322,6 @@ class HomeInterface(QWidget):
             self._playback.stop()
         self.video_display_component.clear_selections()
         self.output_text.clear()
-
-
 
     # ==================== 播放控制 ====================
 
@@ -426,10 +430,8 @@ class HomeInterface(QWidget):
     def set_display_mode(self, mode):
         self.display_mode = mode
         self.video_display_component.set_display_mode(mode)
-        active_s = 'QPushButton { background: #409eff; color: white; border: none; border-radius: 4px; padding: 4px 8px; }'
-        inactive_s = 'QPushButton { background: transparent; color: #ccc; border: none; border-radius: 4px; padding: 4px 8px; }'
-        self.fit_btn.setStyleSheet(active_s if mode == self.DISPLAY_FIT else inactive_s)
-        self.fill_btn.setStyleSheet(active_s if mode == self.DISPLAY_FILL else inactive_s)
+        set_active(self.fit_btn, mode == self.DISPLAY_FIT)
+        set_active(self.fill_btn, mode == self.DISPLAY_FILL)
         self.slider_changed(self.video_slider.value())
 
     # ==================== 视频加载与预览 ====================
@@ -531,7 +533,7 @@ class HomeInterface(QWidget):
             self.frame_width = int(self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.fps = self.video_cap.get(cv2.CAP_PROP_FPS)
             logger.info('video_loaded: size=%dx%d, fps=%.2f, frames=%d',
-                         self.frame_width, self.frame_height, self.fps, self.frame_count)
+                        self.frame_width, self.frame_height, self.fps, self.frame_count)
 
         # 设置视频参数（帧宽高、fps、显示模式），供 VideoDisplayComponent 计算锁定比例等使用
         self.video_display_component.set_video_parameters(
@@ -558,8 +560,6 @@ class HomeInterface(QWidget):
         self.timeline.set_data(self.video_display_component.get_tracks(), self.frame_count, self.fps)
         self.timeline.set_current_frame(1)
         return True
-
-    # ==================== 设置弹窗 ====================
 
     # ==================== 轨道 / 时间轴回调 ====================
 
@@ -629,9 +629,9 @@ class HomeInterface(QWidget):
             return
 
         logger.info('processing_start: path=%s, tracks=%s, ab_sections=%s',
-                     self.video_path,
-                     [t.get("id") for t in self.video_display_component.get_tracks()],
-                     self.video_display_component.get_ab_sections())
+                    self.video_path,
+                    [t.get("id") for t in self.video_display_component.get_tracks()],
+                    self.video_display_component.get_ab_sections())
 
         self._preview_poll_timer.stop()
         self._playback.stop()
@@ -702,7 +702,9 @@ class HomeInterface(QWidget):
                     if process.exitcode == 0:
                         self.progress_signal.emit(100, True)
                     else:
-                        self.append_log_signal.emit([tr['SubtitleExtractorGUI']['ErrorDuringProcessing'].format(f"exit code: {process.exitcode}")])
+                        self.append_log_signal.emit([
+                            tr['SubtitleExtractorGUI']['ErrorDuringProcessing'].format(
+                                f"exit code: {process.exitcode}")])
                 except Exception as e:
                     logger.error('processing_task_error: %s', traceback.format_exc())
                     self.append_log_signal.emit([f"Error: {e}"])
@@ -884,30 +886,20 @@ class HomeInterface(QWidget):
         timestamp = datetime.now().strftime('%H:%M:%S')
         escaped = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         if '错误' in text or 'Error' in text or '失败' in text or 'Failed' in text:
-            color = '#e74c3c'
+            color = '#E5534B'
         elif '成功' in text or '完成' in text or 'Success' in text or 'Finished' in text:
-            color = '#27ae60'
+            color = '#35C27B'
         elif '警告' in text or 'Warning' in text:
-            color = '#f39c12'
+            color = '#E8A33D'
         else:
-            color = '#2980b9'
-        html = f'<span style="color:#888;">[{timestamp}]</span> <span style="color:{color};">{escaped}</span><br>'
-        self.output_text.append(html)
+            color = '#9AA6B8'
+        html = f'<span style="color:#6B7688;">[{timestamp}]</span> <span style="color:{color};">{escaped}</span><br>'
+        self.output_text.append_rich(html)
         logger.info('output_log: %s', ' '.join(str(a) for a in args))
-        if self.auto_scroll:
-            sb = self.output_text.verticalScrollBar()
-            sb.setValue(sb.maximum())
 
         # 开始移除字幕 → 自动切换到双窗口对比显示
         if '开始移除字幕' in text:
             self.current_mode = self.MODE_COMPARE
-
-    def _on_scroll_change(self, value):
-        sb = self.output_text.verticalScrollBar()
-        if value == sb.maximum():
-            self.auto_scroll = True
-        elif self.auto_scroll and value < sb.maximum():
-            self.auto_scroll = False
 
     @pyqtSlot(list)
     def update_preview_with_comp(self, args):
@@ -1033,23 +1025,26 @@ class HomeInterface(QWidget):
 
     # ==================== 关闭清理 ====================
 
-    def closeEvent(self, event):
+    def shutdown(self):
+        """窗口关闭时释放资源（由主窗口调用）。"""
         try:
             self._stop_event.set()
             ProcessManager.instance().terminate_all()
             if self._worker_thread and self._worker_thread.is_alive():
                 self._worker_thread.join(timeout=5)
 
-            self.progress_signal.disconnect(self.update_progress)
-            self.append_log_signal.disconnect(self.append_log)
-            self.update_preview_with_comp_signal.disconnect(self.update_preview_with_comp)
-            self.task_error_signal.disconnect(self.on_task_error)
-            self.toggle_buttons_signal.disconnect(self._toggle_buttons)
-            self.video_display_component.video_slider.valueChanged.disconnect(self.slider_changed)
-            self.video_display_component.tracks_changed.disconnect(self._on_tracks_changed)
-            self.timeline.frame_selected.disconnect(self._on_timeline_frame_selected)
-            self.timeline.preview_seek.disconnect(self._on_preview_seek)
-            self.timeline.track_range_changed.disconnect(self._on_track_range_changed)
+            for signal, slot in (
+                (self.progress_signal, self.update_progress),
+                (self.append_log_signal, self.append_log),
+                (self.update_preview_with_comp_signal, self.update_preview_with_comp),
+                (self.task_error_signal, self.on_task_error),
+                (self.toggle_buttons_signal, self._toggle_buttons),
+            ):
+                try:
+                    signal.disconnect(slot)
+                except Exception:
+                    pass
+
             self._stop_preview_decoder()
 
             with self._video_cap_lock:
@@ -1060,5 +1055,4 @@ class HomeInterface(QWidget):
                     self.output_cap.release()
                     self.output_cap = None
         except Exception as e:
-            logger.warning('close_event_error: %s', e)
-        super().closeEvent(event)
+            logger.warning('shutdown_error: %s', e)

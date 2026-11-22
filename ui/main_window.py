@@ -1,0 +1,249 @@
+"""主窗口：原生标题栏 + 自绘顶栏 + 左侧导航 + 页面堆栈。"""
+
+import os
+import shutil
+import subprocess
+import threading
+import logging
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow,
+                             QStackedWidget, QVBoxLayout, QWidget)
+
+from infra.config import config, tr, VERSION, BASE_DIR
+from infra.process_manager import ProcessManager
+from ui.pages.home_page import HomePage
+from ui.pages.settings_page import SettingsPage
+from ui.theme import tokens
+from ui.widgets.nav import NavButton
+from ui.widgets.toast import Toast
+
+logger = logging.getLogger(__name__)
+
+
+class MainWindow(QMainWindow):
+    _hw_label_ready = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Video Subtitle Remover")
+        self.resize(1246, 810)
+        self.setMinimumSize(960, 640)
+        self.setWindowIcon(QtGui.QIcon(
+            os.path.join(BASE_DIR, 'ui', 'icon', 'asr.ico')))
+
+        root = QWidget()
+        root.setObjectName('Root')
+        self.setCentralWidget(root)
+
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._build_header())
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self._build_nav())
+
+        self.stack = QStackedWidget()
+        body.addWidget(self.stack, 1)
+        outer.addLayout(body, 1)
+
+        self.home_page = HomePage()
+        self.settings_page = SettingsPage()
+        self.stack.addWidget(self.home_page)
+        self.stack.addWidget(self.settings_page)
+
+        self.home_btn.setChecked(True)
+        self.home_btn.clicked.connect(lambda: self._switch_page(0))
+        self.settings_btn.clicked.connect(lambda: self._switch_page(1))
+
+        self.toast = Toast(self)
+        config.appRestartSig.connect(
+            lambda: self.toast.show_message('配置已更新，重启后生效'))
+
+        self.home_page.hardware_changed.connect(self._refresh_hardware_label)
+
+        self._setup_hardware_badge()
+
+    # ---- 顶栏 ----
+
+    def _build_header(self):
+        header = QFrame()
+        header.setObjectName('TitleBar')
+        header.setFixedHeight(tokens.TITLE_H)
+
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(16, 0, 16, 0)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Video Subtitle Remover", objectName='AppTitle'))
+        layout.addWidget(QLabel(tr['SubtitleExtractorGUI']['Title'], objectName='HwBadge'))
+        layout.addStretch(1)
+
+        self._hw_label = QLabel('', objectName='HwBadge')
+        layout.addWidget(self._hw_label)
+        layout.addWidget(QLabel(f"v{VERSION}", objectName='Version'))
+        return header
+
+    # ---- 导航 ----
+
+    def _build_nav(self):
+        rail = QFrame()
+        rail.setObjectName('NavRail')
+        rail.setFixedWidth(tokens.NAV_WIDTH)
+
+        layout = QVBoxLayout(rail)
+        layout.setContentsMargins(9, 10, 9, 10)
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+
+        self.home_btn = NavButton('home', tr['SubtitleExtractorGUI']['Title'])
+        self.settings_btn = NavButton('settings', tr['SubtitleExtractorGUI']['Setting'])
+        layout.addWidget(self.home_btn)
+        layout.addWidget(self.settings_btn)
+        layout.addStretch(1)
+        return rail
+
+    def _switch_page(self, index):
+        self.stack.setCurrentIndex(index)
+
+    # ---- 硬件信息 ----
+
+    def _setup_hardware_badge(self):
+        self._hw_query_running = False
+        self._hw_label_ready.connect(self._hw_label.setText)
+        self._refresh_hardware_label()
+
+        self._hw_refresh_timer = QTimer(self)
+        self._hw_refresh_timer.setInterval(2000)
+        self._hw_refresh_timer.timeout.connect(self._refresh_hardware_label)
+        self._hw_refresh_timer.start()
+
+    def _refresh_hardware_label(self):
+        """刷新顶栏硬件信息文本（读取当前配置 + 实际硬件）。
+
+        nvidia-smi / torch 查询放到后台线程，避免阻塞 GUI 事件循环。
+        """
+        from infra.hardware import HardwareAccelerator
+
+        hw = HardwareAccelerator.instance()
+
+        if not config.hardwareAcceleration.value:
+            self._hw_label.setText("CPU（GPU 加速已关闭）")
+            return
+        if hw.has_cuda():
+            if self._hw_query_running:
+                return
+            self._hw_query_running = True
+            threading.Thread(target=self._query_hardware_async, daemon=True).start()
+            return
+        if hw.has_mps():
+            text = "MPS (Apple GPU)"
+        elif hw.has_accelerator():
+            text = hw.accelerator_name
+        else:
+            text = "CPU（无 GPU 加速器）"
+        self._hw_label.setText(text)
+
+    def _query_hardware_async(self):
+        """后台线程：查询系统级显存占用并通过信号回传主线程。"""
+        try:
+            gpu_name, vram_text = self._query_nvidia_smi()
+            if gpu_name and vram_text:
+                text = f"GPU: {gpu_name}  |  VRAM: {vram_text}"
+            else:
+                # nvidia-smi 不可用时回退到 torch（只看主进程 context）
+                try:
+                    import torch
+                    gpu_name = torch.cuda.get_device_name(0)
+                    free_b, total_b = torch.cuda.mem_get_info()
+                    used_gb = (total_b - free_b) / (1024 ** 3)
+                    total_gb = total_b / (1024 ** 3)
+                    text = f"GPU: {gpu_name}  |  VRAM: {used_gb:.1f}GB / {total_gb:.1f}GB"
+                except Exception:
+                    text = "GPU (CUDA)"
+            self._hw_label_ready.emit(text)
+        finally:
+            self._hw_query_running = False
+
+    def _query_nvidia_smi(self):
+        """调用 nvidia-smi 查询系统级 GPU 名字和显存占用。"""
+        nvidia_smi = shutil.which('nvidia-smi')
+        if not nvidia_smi:
+            return None, None
+        try:
+            result = subprocess.run(
+                [nvidia_smi,
+                 '--query-gpu=name,memory.used,memory.total',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, timeout=3, text=True
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None, None
+            parts = result.stdout.strip().split(', ')
+            if len(parts) < 3:
+                return None, None
+            gpu_name = parts[0].strip()
+            used_mb = float(parts[1])
+            total_mb = float(parts[2])
+            vram_text = f"{used_mb/1024:.1f}GB / {total_mb/1024:.1f}GB"
+            return gpu_name, vram_text
+        except Exception:
+            return None, None
+
+    # ---- 窗口位置 ----
+
+    def load_window_position(self):
+        try:
+            x = config.windowX.value
+            y = config.windowY.value
+            width = config.windowW.value
+            height = config.windowH.value
+
+            if x is None or y is None:
+                self.center_window()
+                return
+
+            screen_rect = QtWidgets.QApplication.primaryScreen().availableGeometry()
+            if (x >= 0 and y >= 0 and
+                    x + width <= screen_rect.width() and
+                    y + height <= screen_rect.height()):
+                self.setGeometry(x, y, width, height)
+            else:
+                self.center_window()
+        except Exception as e:
+            logger.warning('window_position_load_failed: %s', e)
+            self.center_window()
+
+    def save_window_position(self):
+        config.set(config.windowX, self.x())
+        config.set(config.windowY, self.y())
+        config.set(config.windowW, self.width())
+        config.set(config.windowH, self.height())
+
+    def center_window(self):
+        screen_rect = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        window_rect = self.frameGeometry()
+        window_rect.moveCenter(screen_rect.center())
+        self.move(window_rect.topLeft())
+
+    # ---- 关闭 ----
+
+    def closeEvent(self, event):
+        self.save_window_position()
+        try:
+            self.home_page.shutdown()
+        finally:
+            ProcessManager.instance().terminate_all()
+        super().closeEvent(event)
+
+    def keyPressEvent(self, event):
+        if (event.key() == QtCore.Qt.Key.Key_C and
+                event.modifiers() == QtCore.Qt.KeyboardModifier.ControlModifier):
+            logger.warning('user_interrupt: Ctrl+C')
+            self.close()
+        else:
+            super().keyPressEvent(event)

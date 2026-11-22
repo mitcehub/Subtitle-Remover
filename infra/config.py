@@ -1,6 +1,15 @@
-"""配置管理：常量、枚举、Config 类、模型路径、翻译加载。"""
+"""配置管理：常量、枚举、轻量配置层、模型路径、翻译加载。
+
+不依赖任何第三方 UI 框架：配置项自带校验，读写标准 JSON。
+对外 API 保持兼容：
+    config.<item>.value
+    config.set(item, value)
+    config.appRestartSig.connect(fn)
+    config.interfaceTexts / config.get_sttn_max_load_num()
+"""
 
 import os
+import json
 import logging
 import configparser
 from enum import Enum, unique
@@ -50,22 +59,151 @@ DEFAULT_PROPAINTER_CKPT = os.path.join(
     BASE_DIR, 'core', 'inpaint', 'models', 'propainter', 'gen_310020.pt')
 
 # ============================================================================
+# 校验器
+# ============================================================================
+
+class Validator:
+    """默认校验器：原样返回。"""
+
+    def validate(self, value):
+        return value
+
+
+class BoolValidator(Validator):
+    def validate(self, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'on')
+        return bool(value)
+
+
+class RangeValidator(Validator):
+    """整数区间校验；越界会被夹紧到 [min, max]。"""
+
+    def __init__(self, minimum, maximum):
+        self.min = minimum
+        self.max = maximum
+
+    def validate(self, value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = self.min
+        return max(self.min, min(self.max, value))
+
+
+class OptionsValidator(Validator):
+    """可选值校验；非法值回落到第一个选项。"""
+
+    def __init__(self, options):
+        self.options = list(options)
+
+    def validate(self, value):
+        return value if value in self.options else self.options[0]
+
+
+class ConfigValidator(Validator):
+    """通用校验器占位（路径、坐标等自由文本）。"""
+
+
+class EnumSerializer:
+    """JSON 字符串 <-> Enum 成员互转。"""
+
+    def __init__(self, enum_cls):
+        self.enum = enum_cls
+
+    def to_json(self, value):
+        return value.value if isinstance(value, self.enum) else value
+
+    def from_json(self, value):
+        if isinstance(value, self.enum):
+            return value
+        return self.enum(value)
+
+
+# ============================================================================
+# 配置项
+# ============================================================================
+
+class ConfigItem:
+    """单个配置项：持有当前值并负责校验与持久化。"""
+
+    def __init__(self, group, name, default, validator=None,
+                 restart=False, serializer=None):
+        self.group = group
+        self.name = name
+        self.default = default
+        self.validator = validator or Validator()
+        self.restart = restart
+        self.serializer = serializer
+        self._value = default
+        self._owner = None
+
+    @property
+    def value(self):
+        return self._value
+
+    def set_value(self, value, save=True):
+        validated = self.validator.validate(value)
+        changed = validated != self._value
+        self._value = validated
+        if self._owner is not None:
+            if save:
+                self._owner.save()
+            if changed and self.restart:
+                self._owner.appRestartSig.emit()
+        return changed
+
+    # ---- 序列化 ----
+    def dump(self):
+        if self.serializer is not None:
+            return self.serializer.to_json(self._value)
+        return self._value
+
+    def load(self, raw):
+        if self.serializer is not None:
+            raw = self.serializer.from_json(raw)
+        self._value = self.validator.validate(raw)
+
+
+class _Signal:
+    """极简信号：只用于配置变更通知（不依赖 Qt）。"""
+
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot):
+        if slot not in self._slots:
+            self._slots.append(slot)
+
+    def disconnect(self, slot=None):
+        if slot is None:
+            self._slots.clear()
+        elif slot in self._slots:
+            self._slots.remove(slot)
+
+    def emit(self, *args):
+        for slot in list(self._slots):
+            try:
+                slot(*args)
+            except Exception:
+                logger.exception('config_signal_slot_error')
+
+
+# ============================================================================
 # Config 类
 # ============================================================================
 
-from qfluentwidgets import (qconfig, ConfigItem, QConfig, OptionsValidator, BoolValidator,
-                            OptionsConfigItem, EnumSerializer, RangeValidator,
-                            RangeConfigItem, ConfigValidator)
-
-
-class Config(QConfig):
+class Config:
     # 仅列出实际随项目分发的翻译文件，避免选择后静默回退中文
     interfaceTexts = {
         '简体中文': 'ch',
         'English': 'en',
     }
-    interface = OptionsConfigItem("Window", "Interface", "ch",
-                                  OptionsValidator(interfaceTexts.values()), restart=True)
+
+    interface = ConfigItem("Window", "Interface", "ch",
+                           OptionsValidator(interfaceTexts.values()), restart=True)
 
     windowX = ConfigItem("Window", "X", None)
     windowY = ConfigItem("Window", "Y", None)
@@ -74,8 +212,9 @@ class Config(QConfig):
 
     subtitleSelectionAreas = ConfigItem("Main", "SubtitleSelectionAreas", "0.88,0.99,0.15,0.85")
 
-    inpaintMode = OptionsConfigItem("Main", "InpaintMode", InpaintMode.STTN_AUTO,
-                                    OptionsValidator(InpaintMode), EnumSerializer(InpaintMode))
+    inpaintMode = ConfigItem("Main", "InpaintMode", InpaintMode.STTN_AUTO,
+                             OptionsValidator(InpaintMode),
+                             serializer=EnumSerializer(InpaintMode))
 
     e2fgviCheckpoint = ConfigItem("Models", "E2FGVICheckpoint", DEFAULT_E2FGVI_CKPT)
     propainterCheckpoint = ConfigItem("Models", "ProPainterCheckpoint", DEFAULT_PROPAINTER_CKPT)
@@ -86,26 +225,85 @@ class Config(QConfig):
     # 当前 5 × 10 = 50，正好等于 MaxLoadNum 下限。
     # 区间规则：默认值固定为「最低效果/最低开销」一端，只允许朝提高效果的方向调整。
     # 数值越大效果越好的参数：默认值即下限；数值越小效果越好的参数：默认值即上限。
-    sttnNeighborStride = RangeConfigItem("Sttn", "NeighborStride", 5, RangeValidator(2, 5))
-    sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(2, 10))
-    sttnMaxLoadNum = RangeConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(50, 300))
+    sttnNeighborStride = ConfigItem("Sttn", "NeighborStride", 5, RangeValidator(2, 5))
+    sttnReferenceLength = ConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(2, 10))
+    sttnMaxLoadNum = ConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(50, 300))
 
-    e2fgviMaxFrames = RangeConfigItem("E2FGVI", "MaxFrames", 150, RangeValidator(150, 300))
-    e2fgviNeighborStride = RangeConfigItem("E2FGVI", "NeighborStride", 5, RangeValidator(2, 5))
-    e2fgviReferenceLength = RangeConfigItem("E2FGVI", "ReferenceLength", 10, RangeValidator(2, 10))
+    e2fgviMaxFrames = ConfigItem("E2FGVI", "MaxFrames", 150, RangeValidator(150, 300))
+    e2fgviNeighborStride = ConfigItem("E2FGVI", "NeighborStride", 5, RangeValidator(2, 5))
+    e2fgviReferenceLength = ConfigItem("E2FGVI", "ReferenceLength", 10, RangeValidator(2, 10))
 
-    propainterLocalFrames = RangeConfigItem("ProPainter", "LocalFrames", 10, RangeValidator(10, 20))
-    propainterReferenceFrames = RangeConfigItem("ProPainter", "ReferenceFrames", 10, RangeValidator(10, 20))
-    propainterStride = RangeConfigItem("ProPainter", "Stride", 5, RangeValidator(1, 5))
-
-    def get_sttn_max_load_num(self):
-        return max(self.sttnMaxLoadNum.value, self.sttnNeighborStride.value * self.sttnReferenceLength.value)
+    propainterLocalFrames = ConfigItem("ProPainter", "LocalFrames", 10, RangeValidator(10, 20))
+    propainterReferenceFrames = ConfigItem("ProPainter", "ReferenceFrames", 10, RangeValidator(10, 20))
+    propainterStride = ConfigItem("ProPainter", "Stride", 5, RangeValidator(1, 5))
 
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", True, BoolValidator())
 
     checkUpdateOnStartup = ConfigItem("Main", "CheckUpdateOnStartup", True, BoolValidator())
 
     saveDirectory = ConfigItem("Main", "SaveDirectory", "", ConfigValidator())
+
+    def __init__(self):
+        self.appRestartSig = _Signal()
+        self._items = []
+        self._raw = {}
+        self._path = None
+        for klass in reversed(type(self).__mro__):
+            for attr in vars(klass).values():
+                if isinstance(attr, ConfigItem):
+                    attr._owner = self
+                    self._items.append(attr)
+
+    def get_sttn_max_load_num(self):
+        return max(self.sttnMaxLoadNum.value,
+                   self.sttnNeighborStride.value * self.sttnReferenceLength.value)
+
+    # ---- 读写 ----
+    def load(self, path):
+        self._path = path
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {}
+        except FileNotFoundError:
+            data = {}
+        except Exception as e:
+            logger.warning('config_load_failed: %s', e)
+            data = {}
+        self._raw = data
+        for item in self._items:
+            section = data.get(item.group)
+            if isinstance(section, dict) and item.name in section:
+                try:
+                    item.load(section[item.name])
+                except Exception as e:
+                    logger.warning('config_item_load_failed: %s.%s: %s',
+                                   item.group, item.name, e)
+        self.save()
+
+    def save(self):
+        if not self._path:
+            return
+        data = dict(self._raw)
+        for item in self._items:
+            section = data.get(item.group)
+            if not isinstance(section, dict):
+                section = {}
+                data[item.group] = section
+            section[item.name] = item.dump()
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            tmp = self._path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            os.replace(tmp, self._path)
+            self._raw = data
+        except Exception:
+            logger.exception('config_save_failed: %s', self._path)
+
+    def set(self, item, value):
+        item.set_value(value)
 
 
 # ============================================================================
@@ -114,7 +312,7 @@ class Config(QConfig):
 
 CONFIG_FILE = os.path.join(BASE_DIR, 'config', 'config.json')
 config = Config()
-qconfig.load(CONFIG_FILE, config)
+config.load(CONFIG_FILE)
 
 tr = configparser.ConfigParser()
 TRANSLATION_FILE = os.path.join(BASE_DIR, 'config', 'translations', f"{config.interface.value}.ini")

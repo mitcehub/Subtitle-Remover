@@ -5,7 +5,6 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QMenu
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QEvent
 from PyQt6.QtGui import QAction, QShortcut, QCursor
 from PyQt6 import QtCore, QtWidgets, QtGui
-from qfluentwidgets import HollowHandleStyle
 from infra.config import config, tr
 from ui.component.timeline_widget import TRACK_COLORS
 from ui.coordinate_mapper import CoordinateMapper
@@ -93,7 +92,9 @@ class VideoDisplayComponent(QWidget):
         # 状态叠加标签
         self.status_label = QtWidgets.QLabel(self)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setStyleSheet('color: #ccc; font-size: 16px; background: #111; border-radius: 10px;')
+        self.status_label.setStyleSheet(
+            'color: #9AA6B8; font-size: 15px; background: #1B2230;'
+            ' border: 1px solid #2E3748; border-radius: 10px; padding: 10px 18px;')
         self.status_label.hide()
 
         # 视频画面（填满剩余空间）
@@ -105,12 +106,6 @@ class VideoDisplayComponent(QWidget):
         self.video_slider.setFixedHeight(22)
         self.video_slider.setMaximum(100)
         self.video_slider.setValue(1)
-        self.video_slider.setStyle(HollowHandleStyle({
-            "handle.color": QtGui.QColor(255, 255, 255),
-            "handle.ring-width": 4,
-            "handle.hollow-radius": 6,
-            "handle.margin": 1
-        }))
         self.video_slider.hide()
     
     def __init_shortcuts(self):
