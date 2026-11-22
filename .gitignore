@@ -18,6 +18,12 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+.trae/
+
+# 模型权重（体积过大，不纳入版本控制；sttn.pt 由 LFS 单独管理）
+core/inpaint/models/e2fgvi/
+core/inpaint/models/propainter/
+core/inpaint/models/sttn/sttn_300000_backup.pt
 
 # Temp
 temp/

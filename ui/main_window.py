@@ -1,4 +1,4 @@
-"""主窗口：原生标题栏 + 自绘顶栏 + 左侧导航 + 页面堆栈。"""
+"""主窗口：原生标题栏（含硬件信息）+ 左侧导航 + 页面堆栈。"""
 
 import os
 import shutil
@@ -11,7 +11,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow,
                              QStackedWidget, QVBoxLayout, QWidget)
 
-from infra.config import config, tr, VERSION, BASE_DIR
+from infra.config import config, tr, BASE_DIR, VERSION
 from infra.process_manager import ProcessManager
 from ui.pages.home_page import HomePage
 from ui.pages.settings_page import SettingsPage
@@ -27,7 +27,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Video Subtitle Remover")
+        # 使用系统原生标题栏：拖动、边缘缩放、窗口按钮都由系统提供，稳定可靠。
+        # 硬件信息通过窗口标题文字展示（见 _apply_hw_text）。
+        self._hw_text = ''
+        self.setWindowTitle(self._build_title())
         self.resize(1246, 810)
         self.setMinimumSize(960, 640)
         self.setWindowIcon(QtGui.QIcon(
@@ -40,7 +43,6 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        outer.addWidget(self._build_header())
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -68,31 +70,6 @@ class MainWindow(QMainWindow):
 
         self._setup_hardware_badge()
 
-    # ---- 顶栏 ----
-
-    def _build_header(self):
-        header = QFrame()
-        header.setObjectName('TitleBar')
-        header.setFixedHeight(tokens.TITLE_H)
-
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(16, 0, 16, 0)
-        layout.setSpacing(10)
-
-        logo = QLabel()
-        logo.setPixmap(QtGui.QIcon(
-            os.path.join(BASE_DIR, 'ui', 'icon', 'asr.ico')).pixmap(20, 20))
-        layout.addWidget(logo)
-
-        layout.addWidget(QLabel("Video Subtitle Remover", objectName='AppTitle'))
-        layout.addWidget(QLabel(tr['SubtitleExtractorGUI']['Title'], objectName='HwBadge'))
-        layout.addStretch(1)
-
-        self._hw_label = QLabel('', objectName='HwBadge')
-        layout.addWidget(self._hw_label)
-        layout.addWidget(QLabel(f"v{VERSION}", objectName='Version'))
-        return header
-
     # ---- 导航 ----
 
     def _build_nav(self):
@@ -115,11 +92,21 @@ class MainWindow(QMainWindow):
     def _switch_page(self, index):
         self.stack.setCurrentIndex(index)
 
-    # ---- 硬件信息 ----
+    # ---- 硬件信息（显示在原生标题栏） ----
+
+    def _build_title(self):
+        """基础标题 + 当前硬件信息。"""
+        base = "Video Subtitle Remover"
+        return f"{base}  —  {self._hw_text}" if self._hw_text else base
+
+    def _apply_hw_text(self, text):
+        """更新硬件信息并刷新原生标题栏文字。"""
+        self._hw_text = text or ''
+        self.setWindowTitle(self._build_title())
 
     def _setup_hardware_badge(self):
         self._hw_query_running = False
-        self._hw_label_ready.connect(self._hw_label.setText)
+        self._hw_label_ready.connect(self._apply_hw_text)
         self._refresh_hardware_label()
 
         self._hw_refresh_timer = QTimer(self)
@@ -128,7 +115,7 @@ class MainWindow(QMainWindow):
         self._hw_refresh_timer.start()
 
     def _refresh_hardware_label(self):
-        """刷新顶栏硬件信息文本（读取当前配置 + 实际硬件）。
+        """刷新硬件信息文本（读取当前配置 + 实际硬件）。
 
         nvidia-smi / torch 查询放到后台线程，避免阻塞 GUI 事件循环。
         """
@@ -137,7 +124,7 @@ class MainWindow(QMainWindow):
         hw = HardwareAccelerator.instance()
 
         if not config.hardwareAcceleration.value:
-            self._hw_label.setText("CPU（GPU 加速已关闭）")
+            self._apply_hw_text("CPU（GPU 加速已关闭）")
             return
         if hw.has_cuda():
             if self._hw_query_running:
@@ -151,7 +138,7 @@ class MainWindow(QMainWindow):
             text = hw.accelerator_name
         else:
             text = "CPU（无 GPU 加速器）"
-        self._hw_label.setText(text)
+        self._apply_hw_text(text)
 
     def _query_hardware_async(self):
         """后台线程：查询系统级显存占用并通过信号回传主线程。"""

@@ -2,7 +2,7 @@
     "Main": {
         "CheckUpdateOnStartup": true,
         "HardwareAcceleration": true,
-        "InpaintMode": "e2fgvi",
+        "InpaintMode": "propainter",
         "SaveDirectory": "",
         "SubtitleSelectionAreas": "0.88,0.99,0.15,0.85"
     },
@@ -28,12 +28,12 @@
     "Window": {
         "Interface": "ch",
         "Height": 810,
-        "Width": 1246,
-        "X": 374,
-        "Y": 134
+        "Width": 1230,
+        "X": 376,
+        "Y": 122
     },
     "ProPainter": {
-        "LocalFrames": 10,
+        "LocalFrames": 15,
         "ReferenceFrames": 10,
         "Stride": 5
     },

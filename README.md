@@ -163,6 +163,4 @@ python gui.py
    ProPainter 还需要同目录下的 `raft-things.pth` 光流权重（默认自动查找）。
    三个模型都会按当前选区裁剪后推理，再只把该区域写回；AB 区间外恢复原视频。
 
-## 致谢
 
-本程序使用了 [YaoFANGUK/video-subtitle-remover](https://github.com/YaoFANGUK/video-subtitle-remover) 的部分代码，感谢原作者的贡献。

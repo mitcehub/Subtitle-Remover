@@ -14,9 +14,12 @@ def _make(name, size, color, text):
     if key in _CACHE:
         return _CACHE[key]
 
+    # 以 2 倍物理分辨率绘制，再交给 QIcon 按需缩放。
+    # 注意：不要调用 pm.setDevicePixelRatio(dpr)！pixmap 一旦带 DPR，
+    # QPainter 的坐标已自动按 DPR 换算，再 scale(dpr) 会造成双重缩放，
+    # 在高分屏（DPR=2）上图标会被裁剪成半截。
     dpr = 2
     pm = QPixmap(size * dpr, size * dpr)
-    pm.setDevicePixelRatio(dpr)
     pm.fill(Qt.GlobalColor.transparent)
 
     p = QPainter(pm)
@@ -26,7 +29,7 @@ def _make(name, size, color, text):
     c = QColor(color)
     s = float(size)
     pen = QPen(c)
-    pen.setWidthF(max(1.4, s / 12))
+    pen.setWidthF(max(1.8, s / 9))
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
@@ -88,8 +91,10 @@ def _make(name, size, color, text):
             p.drawEllipse(QPointF(x * s, y * s), .07 * s, .07 * s)
             p.setBrush(Qt.BrushStyle.NoBrush)
     elif name == 'speed':
-        f = QFont()
-        f.setPointSizeF(size * 0.44)
+        # 文字用像素尺寸（setPixelSize）而非点尺寸，避免高 DPI 下字号受系统缩放
+        # 影响而被裁切；显式指定字体族，保证 "1x/2x/4x" 稳定显示。
+        f = QFont(tokens.FONT_MONO)
+        f.setPixelSize(max(10, int(size * 0.5)))
         f.setBold(True)
         p.setFont(f)
         p.setPen(c)

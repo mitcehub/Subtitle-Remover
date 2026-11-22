@@ -1,9 +1,9 @@
 """设置字段：下拉框 / 滑杆 / 开关 / 路径选择。"""
 
 from PyQt6.QtCore import Qt, QTimer, QPointF
-from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF, QIntValidator
 from PyQt6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
-                             QSlider, QVBoxLayout, QWidget)
+                             QLineEdit, QSlider, QVBoxLayout, QWidget)
 
 from infra.config import config
 from ui.theme import tokens
@@ -68,42 +68,70 @@ class ComboBoxField(_Field):
             config.set(self._item, self._options[index])
 
 
+class NoWheelSlider(QSlider):
+    """忽略滚轮事件的滑杆：鼠标在设置面板滚动时不应误改参数值。"""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class RangeField(_Field):
-    """整数滑杆字段；拖动时只更新显示，停手后才落盘。"""
+    """整数参数字段：滑杆 + 可输入数字框；改值后延迟落盘。"""
 
     def __init__(self, title, config_item, desc=None, parent=None):
         super().__init__(title, desc, parent)
         self._item = config_item
         validator = config_item.validator
+        self._min = int(validator.min)
+        self._max = int(validator.max)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
 
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(int(validator.min), int(validator.max))
+        self.slider = NoWheelSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(self._min, self._max)
         self.slider.setValue(int(config_item.value))
         self.slider.setSingleStep(1)
         self.slider.setPageStep(1)
 
-        self.value_label = QLabel(str(config_item.value), objectName='FieldValue')
-        self.value_label.setFixedWidth(44)
-        self.value_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # 数字框：可直接键入，限定在 [min, max]，回车或失焦后生效
+        self.value_edit = QLineEdit(str(config_item.value), objectName='FieldValueEdit')
+        self.value_edit.setFixedWidth(52)
+        self.value_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.value_edit.setValidator(QIntValidator(self._min, self._max, self))
+        self.value_edit.setToolTip(f'可输入 {self._min} ~ {self._max} 的整数')
 
         row.addWidget(self.slider, 1)
-        row.addWidget(self.value_label)
+        row.addWidget(self.value_edit)
         self._layout.addLayout(row)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._commit)
-        self.slider.valueChanged.connect(self._on_value)
+        self.slider.valueChanged.connect(self._on_slider)
+        self.value_edit.editingFinished.connect(self._on_edit)
 
-    def _on_value(self, value):
-        self.value_label.setText(str(value))
+    def _on_slider(self, value):
+        # 滑杆变化时刷新输入框（阻塞信号避免递归）
+        self.value_edit.blockSignals(True)
+        self.value_edit.setText(str(value))
+        self.value_edit.blockSignals(False)
         self._timer.start()
+
+    def _on_edit(self):
+        # 手动输入：校验并夹紧到范围，同步回滑杆
+        try:
+            value = int(self.value_edit.text())
+        except ValueError:
+            value = self.slider.value()
+        value = max(self._min, min(self._max, value))
+        self.value_edit.setText(str(value))
+        if self.slider.value() != value:
+            self.slider.setValue(value)  # 会触发 _on_slider → 重启定时器
+        else:
+            self._timer.start()
 
     def _commit(self):
         config.set(self._item, self.slider.value())

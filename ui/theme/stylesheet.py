@@ -38,6 +38,17 @@ QFrame#Divider {
 QLabel#FieldTitle { color: $TEXT_PRIMARY; font-size: 13px; }
 QLabel#FieldDesc  { color: $TEXT_MUTED; font-size: 11px; }
 QLabel#FieldValue { color: $ACCENT; font-family: $FONT_MONO; font-size: 12px; }
+QLineEdit#FieldValueEdit {
+    background: $BG_INPUT;
+    border: 1px solid $BORDER;
+    border-radius: $RADIUS_SM;
+    padding: 3px 4px;
+    color: $ACCENT;
+    font-family: $FONT_MONO;
+    font-size: 12px;
+}
+QLineEdit#FieldValueEdit:hover { border-color: $BORDER_STRONG; }
+QLineEdit#FieldValueEdit:focus { border-color: $ACCENT; }
 QLabel#Timecode   { color: $TEXT_SECONDARY; font-family: $FONT_MONO; font-size: 12px; }
 QLabel#HwBadge    { color: $TEXT_MUTED; font-size: 11px; }
 QLabel#Version    { color: $TEXT_MUTED; font-size: 11px; }
@@ -50,13 +61,9 @@ QLabel#Toast {
     color: $TEXT_PRIMARY;
 }
 
-/* ---------- 顶部栏 / 导航 ---------- */
-QFrame#TitleBar {
-    background: $BG_PANEL;
-    border-bottom: 1px solid $BORDER;
-}
+/* ---------- 导航 ---------- */
 QFrame#NavRail {
-    background: #121722;
+    background: $BG_APP;
     border-right: 1px solid $BORDER;
 }
 
@@ -68,11 +75,11 @@ QPushButton {
     padding: 6px 14px;
     color: $TEXT_PRIMARY;
 }
-QPushButton:hover { background: #313C50; border-color: $BORDER_STRONG; }
-QPushButton:pressed { background: #263042; }
+QPushButton:hover { background: $BG_CARD_HOVER; border-color: $BORDER_STRONG; }
+QPushButton:pressed { background: $BG_ELEVATED; }
 QPushButton:disabled {
-    background: #1E2531;
-    border-color: #262F3F;
+    background: $BG_PANEL;
+    border-color: $BORDER;
     color: $TEXT_MUTED;
 }
 
@@ -85,7 +92,7 @@ QPushButton[kind="primary"] {
 QPushButton[kind="primary"]:hover { background: $ACCENT_HOVER; border-color: $ACCENT_HOVER; }
 QPushButton[kind="primary"]:pressed { background: $ACCENT_PRESSED; border-color: $ACCENT_PRESSED; }
 QPushButton[kind="primary"]:disabled {
-    background: #2A3446;
+    background: $BG_ELEVATED;
     border-color: $BORDER;
     color: $TEXT_MUTED;
 }
@@ -190,11 +197,11 @@ QScrollBar:vertical {
     margin: 2px;
 }
 QScrollBar::handle:vertical {
-    background: #39445A;
+    background: $BORDER_STRONG;
     border-radius: 4px;
     min-height: 28px;
 }
-QScrollBar::handle:vertical:hover { background: #4A5771; }
+QScrollBar::handle:vertical:hover { background: $BG_ELEVATED; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
 
@@ -204,11 +211,11 @@ QScrollBar:horizontal {
     margin: 2px;
 }
 QScrollBar::handle:horizontal {
-    background: #39445A;
+    background: $BORDER_STRONG;
     border-radius: 4px;
     min-width: 28px;
 }
-QScrollBar::handle:horizontal:hover { background: #4A5771; }
+QScrollBar::handle:horizontal:hover { background: $BG_ELEVATED; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 

@@ -105,6 +105,4 @@ pip install -r requirements.txt
 python gui.py
 ```
 
-## Acknowledgements
 
-This program uses part of the code from [YaoFANGUK/video-subtitle-remover](https://github.com/YaoFANGUK/video-subtitle-remover). Thanks to the original author for their contribution.
