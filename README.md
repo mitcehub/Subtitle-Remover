@@ -7,19 +7,16 @@
 ## 项目简介
 
 ![python version](https://img.shields.io/badge/Python-3.12+-blue.svg)
-![support os](https://img.shields.io/badge/OS-Windows/macOS/Linux-green.svg)
+![support os](https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-green.svg)
 
-Video-subtitle-remover (VSR) 是一款基于AI技术，将视频中的硬字幕去除的软件。
-主要实现了以下功能：
-- 无损分辨率将视频中的硬字幕去除，生成去除字幕后的文件
-- 通过超强AI算法模型，对去除字幕文本的区域进行填充
-- 支持自定义字幕位置，仅去除定义位置中的字幕
-- 可视化字幕区域框选，在视频预览上直接拖拽选择要去除的字幕区域
-- 原片/处理结果实时对比，处理中可实时预览去除效果
-- 时间轴编辑，支持轨道式时间轴，可精确控制每段字幕的起止范围
-- 播放控制，支持逐帧播放、变速播放、快捷键操作
-- 全新 PyQt6 现代界面，支持系统主题自动跟随
-- UI高级设置面板，无需手动编辑配置文件，通过界面即可调整参数
+Video-subtitle-remover (VSR) 是一款基于 AI 视频修复技术的硬字幕去除工具。它在 **STTN、E2FGVI、ProPainter**
+三种开源视频补全模型的基础上二次训练，针对字幕与文字水印场景做了专项优化，以原分辨率填充字幕区域并生成无字幕视频。
+
+主要功能：
+- 无损分辨率去除硬字幕 / 文字水印，内置三种可切换的修复模型
+- 在预览画面上拖拽框选字幕区域，或用轨道式时间轴精确控制处理区间
+- 处理中实时预览原片与结果对比，支持逐帧、变速播放与快捷键操作
+- PyQt6 现代界面，参数均可在设置面板中调整，无需手动改配置文件
 
 ![Screenshot](doc/Screenshot.png)
 
@@ -28,139 +25,48 @@ Video-subtitle-remover (VSR) 是一款基于AI技术，将视频中的硬字幕�
 
 ## 源码使用说明
 
-#### 1. 安装 Python
+**建议调用 AI Agent（如 Claude Code、Codex、Cursor 等）一键部署**：把本仓库交给它，
+让它按 `requirements.txt` 自动安装 Python 3.12+ 与 CUDA 版 PyTorch 依赖，无需手动逐步配置环境。
 
-请确保您已经安装了 Python 3.12+。
+环境就绪后，运行图形界面：
 
-- Windows 用户可以前往 [Python 官网](https://www.python.org/downloads/windows/) 下载并安装 Python。
-- MacOS 用户可以使用 Homebrew 安装：
-  ```shell
-  brew install python@3.12
-  ```
-- Linux 用户可以使用包管理器安装，例如 Ubuntu/Debian：
-  ```shell
-  sudo apt update && sudo apt install python3.12 python3.12-venv python3.12-dev
-  ```
-
-#### 2. 安装依赖文件
-
-请使用虚拟环境来管理项目依赖，避免与系统环境冲突。
-
-（1）创建虚拟环境并激活
-```shell
-python -m venv videoEnv
-```
-
-- Windows：
-```shell
-videoEnv\\Scripts\\activate
-```
-- MacOS/Linux：
-```shell
-source videoEnv/bin/activate
-```
-
-#### 3. 切换到项目目录
-
-```shell
-cd <源码所在目录>
-```
-
-#### 4. 安装合适的运行环境
-
-本项目支持 CUDA (NVIDIA显卡加速)、CPU (无 GPU)、 DirectML (AMD、Intel等GPU/APU加速) 和 macOS (Apple Silicon) 四种运行模式。
-
-##### (1) CUDA（NVIDIA 显卡用户）
-
-> 请确保您的 NVIDIA 显卡驱动支持所选 CUDA 版本。
-
-- 安装 CUDA（推荐 CUDA 11.8）：
-  - Windows：[CUDA 11.8 下载](https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_522.06_windows.exe)
-  - Linux：
-    ```shell
-    wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run
-    sudo sh cuda_11.8.0_520.61.05_linux.run
-    ```
-
-- 安装 cuDNN（CUDA 11.8 对应 cuDNN 8.6.0）：
-  - [Windows cuDNN 8.6.0 下载](https://developer.download.nvidia.cn/compute/redist/cudnn/v8.6.0/local_installers/11.8/cudnn-windows-x86_64-8.6.0.163_cuda11-archive.zip)
-  - [Linux cuDNN 8.6.0 下载](https://developer.download.nvidia.cn/compute/redist/cudnn/v8.6.0/local_installers/11.8/cudnn-linux-x86_64-8.6.0.163_cuda11-archive.tar.xz)
-  - 安装方法请参考 NVIDIA 官方文档。
-
-- 安装 PaddlePaddle GPU 版本（CUDA 11.8）：
-  ```shell
-  pip install paddlepaddle-gpu==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
-  ```
-- 安装 Torch GPU 版本（CUDA 11.8）：
-  ```shell
-  pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu118
-  ```
-
-- 安装其他依赖
-  ```shell
-  pip install -r requirements.txt
-  ```
-
-##### (2) DirectML（AMD、Intel等GPU/APU加速卡用户）
-
-- 适用于 Windows 设备的 AMD/NVIDIA/Intel GPU。
-  ```shell
-  pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-  pip install -r requirements.txt
-  pip install torch_directml==0.2.5.dev240914
-  ```
-
-##### (3) CPU 运行（无 GPU 加速）
-
-- 适用于没有 GPU 或不希望使用 GPU 的情况。
-  ```shell
-  pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-  pip install torch==2.7.0 torchvision==0.22.0
-  pip install -r requirements.txt
-  ```
-
-##### (4) macOS 运行 (Apple Silicon)
-- 适用于 macOS (Apple Silicon) 设备
-- macOS (Intel) 请使用CPU，强行使用GPU只会更慢
-  ```shell
-  pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-  pip install torch==2.7.0 torchvision==0.22.0
-  pip install -r requirements.txt
-  ```
-
-#### 5. 运行程序
-
-- 运行图形化界面
 ```shell
 python gui.py
 ```
 
+> 最简单的方式仍是直接下载压缩包解压运行，无需部署环境。
+
 ## 常见问题
 
-1. 视频去除效果不好怎么办
+三种处理模型怎么切换
 
-修改 `config/config.json` 中的参数或通过UI高级设置调整：
-
-| 参数 | 说明 |
-|------|------|
-| SttnNeighborStride | 相邻帧数，调大效果变好但显存占用增加 |
-| SttnReferenceLength | 参考帧长度，调大效果变好但显存占用增加 |
-| SttnMaxLoadNum | 最大同时处理的帧数量 |
-
-2. 三种处理模型怎么切换
-
-   `Main -> InpaintMode` 可选择 `STTN`、`E2FGVI`、`ProPainter`。三者均为本地内嵌推理，
-   权重随项目分发，无需训练仓库；如需替换权重，可在 `Models` 配置段指定：
+`Main -> InpaintMode` 可选择 `STTN`、`E2FGVI`、`ProPainter`。三者均为本地内嵌推理，
+本项目使用的 STTN / E2FGVI / ProPainter 权重均为在开源模型基础上的**二次训练**版本，
+针对硬字幕场景做了优化。权重随压缩包分发，源码部署时可借助 AI Agent 自动获取；如需替换权重，可在 `Models` 配置段指定：
 
 ```json
 "Models": {
   "STTNCheckpoint": "core/inpaint/models/sttn/sttn.pt",
-  "E2FGVICheckpoint": "core/inpaint/models/e2fgvi/gen_400000.pth",
-  "ProPainterCheckpoint": "core/inpaint/models/propainter/gen_310020.pt"
+  "E2FGVICheckpoint": "core/inpaint/models/e2fgvi/e2fgvi.pth",
+  "ProPainterCheckpoint": "core/inpaint/models/propainter/propainter.pt"
 }
 ```
 
+路径均为**相对项目根目录**，换机器部署无需修改。
+
    ProPainter 还需要同目录下的 `raft-things.pth` 光流权重（默认自动查找）。
    三个模型都会按当前选区裁剪后推理，再只把该区域写回；AB 区间外恢复原视频。
+
+## 致谢
+
+本项目的模型能力建立在以下优秀开源项目之上，感谢原作者与社区：
+
+- [STTN (Spatial-Temporal Transformer Network)](https://github.com/researchmm/STTN)
+- [E2FGVI (End-to-End Framework for Video Inpainting)](https://github.com/ML-GSAI/E2FGVI)
+- [ProPainter](https://github.com/sczhou/ProPainter)
+
+## 使用声明
+
+本项目仅供个人学习与研究使用，**非商业用途**。如需商业使用，请联系作者获得授权。
 
 

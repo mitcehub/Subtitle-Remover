@@ -2,14 +2,14 @@
     "Main": {
         "CheckUpdateOnStartup": true,
         "HardwareAcceleration": true,
-        "InpaintMode": "propainter",
+        "InpaintMode": "sttn-auto",
         "SaveDirectory": "",
         "SubtitleSelectionAreas": "0.88,0.99,0.15,0.85"
     },
     "Models": {
-        "E2FGVICheckpoint": "E:\\AI Tool\\video subtitle remover\\core\\inpaint\\models\\e2fgvi\\gen_400000.pth",
-        "ProPainterCheckpoint": "E:\\AI Tool\\video subtitle remover\\core\\inpaint\\models\\propainter\\gen_310020.pt",
-        "STTNCheckpoint": "E:\\AI Tool\\video subtitle remover\\core\\inpaint\\models\\sttn\\sttn.pt"
+        "E2FGVICheckpoint": "core/inpaint/models/e2fgvi/e2fgvi.pth",
+        "ProPainterCheckpoint": "core/inpaint/models/propainter/propainter.pt",
+        "STTNCheckpoint": "core/inpaint/models/sttn/sttn.pt"
     },
     "E2FGVI": {
         "MaxFrames": 150,
@@ -29,8 +29,8 @@
         "Interface": "ch",
         "Height": 810,
         "Width": 1230,
-        "X": 376,
-        "Y": 122
+        "X": 354,
+        "Y": 107
     },
     "ProPainter": {
         "LocalFrames": 15,

@@ -13,7 +13,7 @@ import tempfile
 import time
 from tqdm import tqdm
 
-from infra.config import config, tr, MODEL_PATH, InpaintMode
+from infra.config import config, tr, MODEL_PATH, InpaintMode, resolve_model_path
 from infra.hardware import HardwareAccelerator
 from infra.utils import get_readable_path
 from core.inpaint.sttn import STTNAutoInpaint
@@ -154,7 +154,7 @@ class SubtitleRemover:
             self.video_writer = FFmpegVideoWriter(
                 get_readable_path(self.video_temp_file.name), self.fps, self.size)
             sttn = STTNAutoInpaint(self.hardware_accelerator.device,
-                                   config.sttnCheckpoint.value or MODEL_PATH,
+                                   resolve_model_path(config.sttnCheckpoint.value or MODEL_PATH),
                                    self.video_path)
             sttn(input_mask=mask, input_sub_remover=self, tbar=tbar,
                  gui_mode=self.gui_mode)
@@ -166,7 +166,7 @@ class SubtitleRemover:
             self.video_writer = FFmpegVideoWriter(
                 get_readable_path(self.video_temp_file.name), self.fps, self.size)
             e2fgvi = E2FGVIAutoInpaint(self.hardware_accelerator.device,
-                                       config.e2fgviCheckpoint.value,
+                                       resolve_model_path(config.e2fgviCheckpoint.value),
                                        self.video_path)
             e2fgvi(input_mask=mask, input_sub_remover=self, tbar=tbar,
                    gui_mode=self.gui_mode)
@@ -179,7 +179,7 @@ class SubtitleRemover:
         self.video_writer = FFmpegVideoWriter(
             get_readable_path(self.video_temp_file.name), self.fps, self.size)
         propainter = ProPainterAutoInpaint(self.hardware_accelerator.device,
-                                           config.propainterCheckpoint.value,
+                                           resolve_model_path(config.propainterCheckpoint.value),
                                            self.video_path)
         propainter(input_mask=mask, input_sub_remover=self, tbar=tbar,
                    gui_mode=self.gui_mode)

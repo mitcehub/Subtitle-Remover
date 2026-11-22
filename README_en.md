@@ -3,106 +3,71 @@
 ## Project Introduction
 
 ![python version](https://img.shields.io/badge/Python-3.12+-blue.svg)
-![support os](https://img.shields.io/badge/OS-Windows/macOS/Linux-green.svg)
+![support os](https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-green.svg)
 
-Video-subtitle-remover (VSR) is an AI-based software that removes hardcoded subtitles from videos.
-It mainly implements the following functionalities:
-- Lossless resolution removal of hardcoded subtitles from videos
-- AI-powered inpainting to fill removed subtitle areas
-- Custom subtitle position selection
-- Visual subtitle area selection by dragging on video preview
-- Real-time original/result comparison during processing
-- Timeline editing with track-based precise control
-- Playback controls with frame-by-frame navigation and variable speed
-- Modern PyQt6 UI with automatic system theme support
-- UI settings panel for STTN parameter adjustment without editing config files
+Video-subtitle-remover (VSR) is an AI video-inpainting tool that removes hardcoded subtitles from videos.
+It is built on **retrained versions of three open-source video completion models — STTN, E2FGVI, and ProPainter**,
+optimized specifically for subtitle and text-watermark scenarios. It fills subtitle areas at the original
+resolution and produces subtitle-free videos.
+
+Key features:
+- Lossless-resolution removal of hardcoded subtitles / text watermarks, with three switchable inpainting models
+- Drag to select subtitle areas on the preview, or use a track-based timeline for precise range control
+- Real-time original/result comparison during processing, with frame-by-frame and variable-speed playback
+- Modern PyQt6 UI with an advanced settings panel — adjust parameters without editing config files
 
 ![Screenshot](doc/Screenshot.png)
 
-## Source Code Usage Instructions
+**Usage:**
+- Download the prebuilt archive and run it directly. If that doesn't work, follow the source-deployment guide below.
 
-#### 1. Install Python
+## Source Code Usage
 
-Please ensure that you have installed Python 3.12+.
+**It is recommended to use an AI Agent (e.g. Claude Code, Codex, Cursor) for one-click deployment**:
+hand it this repository and let it install Python 3.12+ and the CUDA PyTorch dependencies from
+`requirements.txt` automatically — no need to configure the environment step by step.
 
-- Windows: [Python official website](https://www.python.org/downloads/windows/)
-- MacOS:
-  ```shell
-  brew install python@3.12
-  ```
-- Linux (Ubuntu/Debian):
-  ```shell
-  sudo apt update && sudo apt install python3.12 python3.12-venv python3.12-dev
-  ```
+Once the environment is ready, launch the GUI:
 
-#### 2. Install Dependencies
-
-Create and activate the virtual environment:
-```shell
-python -m venv videoEnv
-```
-
-- Windows:
-```shell
-videoEnv\Scripts\activate
-```
-- MacOS/Linux:
-```shell
-source videoEnv/bin/activate
-```
-
-#### 3. Change to project directory
-
-```shell
-cd <project_directory>
-```
-
-#### 4. Install Runtime Environment
-
-##### (1) CUDA (NVIDIA GPU)
-
-- Install PaddlePaddle GPU version (CUDA 11.8):
-  ```shell
-  pip install paddlepaddle-gpu==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
-  ```
-- Install Torch GPU version (CUDA 11.8):
-  ```shell
-  pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu118
-  ```
-- Install other dependencies:
-  ```shell
-  pip install -r requirements.txt
-  ```
-
-##### (2) DirectML (AMD/Intel GPU)
-
-```shell
-pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-pip install -r requirements.txt
-pip install torch_directml==0.2.5.dev240914
-```
-
-##### (3) CPU Only
-
-```shell
-pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-pip install torch==2.7.0 torchvision==0.22.0
-pip install -r requirements.txt
-```
-
-##### (4) macOS (Apple Silicon)
-
-```shell
-pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-pip install torch==2.7.0 torchvision==0.22.0
-pip install -r requirements.txt
-```
-
-#### 5. Run
-
-- GUI:
 ```shell
 python gui.py
 ```
 
+> The simplest option is still to download the prebuilt archive and run it directly, with no environment setup.
 
+## FAQ
+
+How to switch between the three models
+
+Select `STTN`, `E2FGVI`, or `ProPainter` under `Main -> InpaintMode`. All three run locally with
+embedded inference. The STTN / E2FGVI / ProPainter weights shipped with this project are
+**retrained** versions of the open-source models, optimized for hardcoded-subtitle scenarios.
+To replace the weights, edit the `Models` section:
+
+```json
+"Models": {
+  "STTNCheckpoint": "core/inpaint/models/sttn/sttn.pt",
+  "E2FGVICheckpoint": "core/inpaint/models/e2fgvi/e2fgvi.pth",
+  "ProPainterCheckpoint": "core/inpaint/models/propainter/propainter.pt"
+}
+```
+
+Paths are relative to the project root, so no changes are needed when deploying on another machine.
+
+ProPainter additionally needs the `raft-things.pth` optical-flow weight in the same directory
+(found automatically by default). All three models crop to the selected area for inference and
+write back only that region; areas outside the AB sections are restored from the original video.
+
+## Acknowledgements
+
+This project builds upon the following excellent open-source projects. Thanks to the original
+authors and communities:
+
+- [STTN (Spatial-Temporal Transformer Network)](https://github.com/researchmm/STTN)
+- [E2FGVI (End-to-End Framework for Video Inpainting)](https://github.com/ML-GSAI/E2FGVI)
+- [ProPainter](https://github.com/sczhou/ProPainter)
+
+## Usage Notice
+
+This project is intended for **personal study and research only — non-commercial use**.
+For commercial use, please contact the author for authorization.

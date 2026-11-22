@@ -54,9 +54,22 @@ class InpaintMode(Enum):
 # ============================================================================
 
 DEFAULT_E2FGVI_CKPT = os.path.join(
-    BASE_DIR, 'core', 'inpaint', 'models', 'e2fgvi', 'gen_400000.pth')
+    BASE_DIR, 'core', 'inpaint', 'models', 'e2fgvi', 'e2fgvi.pth')
 DEFAULT_PROPAINTER_CKPT = os.path.join(
-    BASE_DIR, 'core', 'inpaint', 'models', 'propainter', 'gen_310020.pt')
+    BASE_DIR, 'core', 'inpaint', 'models', 'propainter', 'propainter.pt')
+
+
+def resolve_model_path(path):
+    """模型权重路径兼容：相对路径按项目根目录解析，绝对路径原样返回。
+
+    config.json 中存相对路径（便于迁移/多机部署），传给 torch.load 前
+    统一转成基于 BASE_DIR 的绝对路径，避免依赖进程工作目录。
+    """
+    if not path:
+        return path
+    if os.path.isabs(path):
+        return path
+    return os.path.join(BASE_DIR, path)
 
 # ============================================================================
 # 校验器

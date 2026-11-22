@@ -4,7 +4,6 @@ import os
 import re
 import shutil
 import stat
-import platform
 import threading
 import logging
 import subprocess
@@ -66,22 +65,11 @@ class FFmpegCLI:
 
     @property
     def ffmpeg_path(self):
-        system = platform.system()
-        if system == "Windows":
-            bundled = os.path.join(BASE_DIR, 'core', 'video_io', 'ffmpeg', 'win_x64', 'ffmpeg.exe')
-        elif system == "Linux":
-            bundled = os.path.join(BASE_DIR, 'core', 'video_io', 'ffmpeg', 'linux_x64', 'ffmpeg')
-        else:
-            bundled = os.path.join(BASE_DIR, 'core', 'video_io', 'ffmpeg', 'macos', 'ffmpeg')
-
+        # 仅内置 Windows x64 版本，路径随项目分发
+        bundled = os.path.join(BASE_DIR, 'core', 'video_io', 'ffmpeg', 'win_x64', 'ffmpeg.exe')
         if os.path.exists(bundled):
             return bundled
-
-        system_ffmpeg = shutil.which('ffmpeg')
-        if system_ffmpeg:
-            return system_ffmpeg
-
-        return bundled
+        return shutil.which('ffmpeg') or bundled
 
     def get_frame_count(self, video_path):
         """
