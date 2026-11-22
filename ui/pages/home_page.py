@@ -662,6 +662,24 @@ class HomePage(QWidget):
 
     # ==================== 运行 / 停止 ====================
 
+    @staticmethod
+    def _safe_output_path(save_dir, stem, ext):
+        """生成不覆盖已有文件、且不跟随符号链接的输出路径（修复 CWE-59）。
+
+        若目标文件已存在或是符号链接，则追加 _1 / _2 ... 直到找到可用路径，
+        避免覆盖用户已有文件，更避免通过符号链接写到意外位置。
+        """
+        base = os.path.abspath(os.path.join(save_dir, f'{stem}_no_sub{ext}'))
+        candidate = base
+        idx = 1
+        while os.path.islink(candidate) or os.path.exists(candidate):
+            candidate = os.path.abspath(
+                os.path.join(save_dir, f'{stem}_no_sub_{idx}{ext}'))
+            idx += 1
+        if candidate != base:
+            logger.info('output_path_avoided_existing: %s -> %s', base, candidate)
+        return candidate
+
     def run_button_clicked(self):
         logger.info('run_button_clicked')
         if not self.video_path:
@@ -725,11 +743,11 @@ class HomePage(QWidget):
             self._processing_finished_called = False
             self.toggle_buttons_signal.emit(False)
 
-            # 计算输出路径
+            # 计算输出路径：避免覆盖已有文件，更不跟随符号链接（CWE-59）
             save_dir = config.saveDirectory.value if config.saveDirectory.value else os.path.dirname(self.video_path)
             stem = Path(self.video_path).stem
             ext = Path(self.video_path).suffix
-            self.output_path = os.path.abspath(os.path.join(save_dir, f'{stem}_no_sub{ext}'))
+            self.output_path = self._safe_output_path(save_dir, stem, ext)
 
             def task():
                 try:

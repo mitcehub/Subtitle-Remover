@@ -3,6 +3,7 @@
 运行：python -m unittest tests.test_regressions -v
 """
 
+import os
 import unittest
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from core.inpaint.sttn import STTNAutoInpaint
 from core.inpaint.e2fgvi import E2FGVIAutoInpaint
 from ui.coordinate_mapper import CoordinateMapper
 from ui.preview_decoder import PreviewDecoder
+from ui.pages.home_page import HomePage
 
 
 class _Point:
@@ -102,6 +104,36 @@ class TestPreviewDecoderCache(unittest.TestCase):
 
     def test_none_passthrough(self):
         self.assertIsNone(PreviewDecoder._prepare(None))
+
+
+class TestSafeOutputPath(unittest.TestCase):
+    """CWE-59：输出路径不得覆盖已有文件，也不得跟随符号链接。"""
+
+    def test_existing_file_gets_suffix(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = HomePage._safe_output_path(d, 'video', '.mp4')
+            self.assertEqual(os.path.basename(path), 'video_no_sub.mp4')
+            # 创建一个同名文件后再次生成，应换名而非复用
+            with open(path, 'wb'):
+                pass
+            path2 = HomePage._safe_output_path(d, 'video', '.mp4')
+            self.assertEqual(os.path.basename(path2), 'video_no_sub_1.mp4')
+
+    def test_symlink_is_avoided(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, 'secret.txt')
+            with open(target, 'wb'):
+                pass
+            link = os.path.join(d, 'video_no_sub.mp4')
+            try:
+                os.symlink(target, link)
+            except (OSError, NotImplementedError):
+                self.skipTest('symlink not supported')
+            path = HomePage._safe_output_path(d, 'video', '.mp4')
+            self.assertNotEqual(path, link)
+            self.assertEqual(os.path.basename(path), 'video_no_sub_1.mp4')
 
 
 if __name__ == '__main__':

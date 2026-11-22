@@ -3,7 +3,6 @@
 import os
 import re
 import shutil
-import stat
 import threading
 import logging
 import subprocess
@@ -51,10 +50,8 @@ class FFmpegCLI:
 
     def __init__(self):
         path = self.ffmpeg_path
-        try:
-            os.chmod(path, stat.S_IRWXU + stat.S_IRWXG + stat.S_IRWXO)
-        except (OSError, FileNotFoundError):
-            pass
+        # 不再 chmod 777（CWE-732）：系统 PATH 中的 ffmpeg 不应被改权限，
+        # 内置 Windows 版随压缩包分发已带可执行属性，无需借 chmod 提权。
         version_info = 'unknown'
         try:
             result = subprocess.run([path, '-version'], capture_output=True, text=True, timeout=FFMPEG_VERSION_TIMEOUT)

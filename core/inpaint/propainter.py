@@ -749,7 +749,10 @@ class InpaintGenerator(BaseNetwork):
             self.init_weights()
 
         if model_path is not None:
-            ckpt = torch.load(model_path, map_location='cpu')
+            try:
+                ckpt = torch.load(model_path, map_location='cpu', weights_only=True)
+            except TypeError:
+                ckpt = torch.load(model_path, map_location='cpu')
             self.load_state_dict(ckpt, strict=True)
 
         self.print_network()
@@ -1346,7 +1349,12 @@ class ProPainterInpaint:
                            len(unexpected), unexpected[:10])
         self.model.eval()
 
-        raft_state = torch.load(raft_path, map_location='cpu')
+        # 仅反序列化张量/基础类型，避免恶意权重文件通过 pickle 执行任意代码（CWE-502）
+        try:
+            raft_state = torch.load(raft_path, map_location='cpu', weights_only=True)
+        except TypeError:
+            # 兼容不支持 weights_only 参数的旧版 PyTorch
+            raft_state = torch.load(raft_path, map_location='cpu')
         if isinstance(raft_state, dict) and 'state_dict' in raft_state:
             raft_state = raft_state['state_dict']
         raft_state = {(k[len('module.'):] if k.startswith('module.') else k): v
