@@ -20,9 +20,7 @@ Thumbs.db
 .idea/
 .trae/
 
-# 模型权重（体积过大，不纳入版本控制；sttn.pt 由 LFS 单独管理）
-core/inpaint/models/e2fgvi/
-core/inpaint/models/propainter/
+# 模型备份文件（sttn.pt / e2fgvi / propainter 权重由 LFS 管理）
 core/inpaint/models/sttn/sttn_300000_backup.pt
 
 # Temp
