@@ -60,6 +60,9 @@ class HomePage(QWidget):
         self.frame_height = None
         self.current_mode = self.MODE_COMPARE
         self.display_mode = self.DISPLAY_FIT
+        # 预览布局：横屏默认单窗（只显示修复后，画面更大），竖屏默认双联对比。
+        # 用户可通过控制栏按钮切换；仅影响"有修复结果"时的显示，不影响选区绘制。
+        self.prefer_single_view = False
         self._has_processed = False
         self._processing_finished_called = False
 
@@ -159,8 +162,15 @@ class HomePage(QWidget):
         control_layout.addWidget(self.fit_btn)
         control_layout.addWidget(self.fill_btn)
 
+        # 单窗 / 对比切换：横屏视频看修复后全画面更直观，竖屏保留左右对比
+        self.view_mode_btn = GhostButton(tr['Main']['CompareView'], parent=self)
+        self.view_mode_btn.setEnabled(False)
+        self.view_mode_btn.setToolTip(tr['Main']['CompareView'])
+        control_layout.addWidget(self.view_mode_btn)
+
         self.fit_btn.clicked.connect(lambda: self.set_display_mode(self.DISPLAY_FIT))
         self.fill_btn.clicked.connect(lambda: self.set_display_mode(self.DISPLAY_FILL))
+        self.view_mode_btn.clicked.connect(self._toggle_view_mode)
 
         # 播放控制图标缓存（供 PlaybackController 使用）
         self._play_icon = icons.icon('play', 18)
@@ -298,15 +308,44 @@ class HomePage(QWidget):
         self.current_mode = mode
         self.slider_changed(self.video_slider.value())
 
+    def _toggle_view_mode(self):
+        """切换单窗（只看修复后）/ 对比（原片+结果双联）。"""
+        self.prefer_single_view = not self.prefer_single_view
+        self._refresh_view_mode_button()
+        # 处理中 slider_changed 会被 worker 守卫拦截，这里用缓存的预览帧立即重绘
+        if self._worker_thread and self._worker_thread.is_alive():
+            if self._last_comp_frame is not None:
+                if self.prefer_single_view:
+                    self.video_display_component.update_video_display(
+                        self._last_comp_frame, draw_selection=False)
+                elif self._last_ori_frame is not None:
+                    combined = self._concat_frames(self._last_ori_frame, self._last_comp_frame)
+                    self.video_display_component.update_video_display(combined, draw_selection=False)
+        else:
+            # 已有处理结果时，同步更新对比/单窗模式，然后重绘
+            if self._has_processed:
+                self.current_mode = self.MODE_SINGLE if self.prefer_single_view else self.MODE_COMPARE
+            self.slider_changed(self.video_slider.value())
+
+    def _refresh_view_mode_button(self):
+        """按钮显示当前所处的布局名称。"""
+        label = tr['Main']['SingleView'] if self.prefer_single_view else tr['Main']['CompareView']
+        self.view_mode_btn.setText(label)
+        self.view_mode_btn.setToolTip(label)
+        set_active(self.view_mode_btn, self.prefer_single_view)
+
     def _set_disp_buttons_enabled(self, enabled):
         self.fit_btn.setEnabled(enabled)
         self.fill_btn.setEnabled(enabled)
+        self.view_mode_btn.setEnabled(enabled)
         if enabled:
             set_active(self.fit_btn, self.display_mode == self.DISPLAY_FIT)
             set_active(self.fill_btn, self.display_mode == self.DISPLAY_FILL)
+            self._refresh_view_mode_button()
         else:
             set_active(self.fit_btn, False)
             set_active(self.fill_btn, False)
+            set_active(self.view_mode_btn, False)
 
     def reset_processed_state(self):
         self._has_processed = False
@@ -543,6 +582,10 @@ class HomePage(QWidget):
             self.fps if self.fps is not None else 30,
             self.display_mode,
         )
+
+        # 横屏视频默认单窗（只显示修复后画面，更直观），竖屏默认双联对比
+        self.prefer_single_view = self.frame_width >= self.frame_height
+        self._refresh_view_mode_button()
 
         self._stop_preview_decoder()
         self._preview_decoder = PreviewDecoder(
@@ -860,8 +903,8 @@ class HomePage(QWidget):
             else:
                 logger.warning('source_video_reopen_failed')
 
-        # 处理完成，切换到单窗口预览输出结果
-        self.current_mode = self.MODE_SINGLE
+        # 处理完成：按布局偏好决定 —— 横屏单窗只显示结果，竖屏保留双联对比
+        self.current_mode = self.MODE_SINGLE if self.prefer_single_view else self.MODE_COMPARE
 
         # 重置时间指针到开头
         self.video_slider.setValue(1)
@@ -919,6 +962,12 @@ class HomePage(QWidget):
 
         self.video_display_component.set_dragger_enabled(False)
         self._set_disp_buttons_enabled(True)
+
+        # 单窗预览（横屏默认）：只显示修复后画面，画面更大更直观，不叠加选区框
+        if self.prefer_single_view:
+            self.video_display_component.update_video_display(frame_comp, draw_selection=False)
+            self.video_display_component.hide_status()
+            return
 
         # 处理中：在原始帧上叠加用户选择框 + 实际推理校准框
         if self._worker_thread and self._worker_thread.is_alive() and self.current_mode == self.MODE_COMPARE:
