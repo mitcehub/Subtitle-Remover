@@ -27,13 +27,11 @@
     },
     "Window": {
         "Interface": "ch",
-        "Height": 810,
-        "Width": 1230,
-        "X": 354,
-        "Y": 107
+        "Height": 900,
+        "Width": 1200
     },
     "ProPainter": {
-        "LocalFrames": 15,
+        "LocalFrames": 10,
         "ReferenceFrames": 10,
         "Stride": 5
     },
