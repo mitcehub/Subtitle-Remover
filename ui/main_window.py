@@ -79,6 +79,11 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 0, 16, 0)
         layout.setSpacing(10)
 
+        logo = QLabel()
+        logo.setPixmap(QtGui.QIcon(
+            os.path.join(BASE_DIR, 'ui', 'icon', 'asr.ico')).pixmap(20, 20))
+        layout.addWidget(logo)
+
         layout.addWidget(QLabel("Video Subtitle Remover", objectName='AppTitle'))
         layout.addWidget(QLabel(tr['SubtitleExtractorGUI']['Title'], objectName='HwBadge'))
         layout.addStretch(1)
