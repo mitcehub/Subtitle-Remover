@@ -194,6 +194,8 @@ class HomePage(QWidget):
         self.timeline.frame_selected.connect(self._on_timeline_frame_selected)
         self.timeline.preview_seek.connect(self._on_preview_seek)
         self.timeline.track_range_changed.connect(self._on_track_range_changed)
+        # 未加载视频时也保留标尺 + 一条空白轨道的高度，避免时间轴被压成一条线
+        self.timeline.setMinimumHeight(80)
         center_layout.addWidget(self.timeline, 0)
 
         self._preview_poll_timer = QTimer(self)

@@ -74,10 +74,13 @@ def _make(name, size, color, text):
             pt(.87, .32), pt(.87, .76), pt(.13, .76),
         ]))
     elif name == 'home':
-        p.drawPolyline(QPolygonF([pt(.18, .5), pt(.5, .22), pt(.82, .5)]))
-        p.drawPolyline(QPolygonF([
-            pt(.28, .46), pt(.28, .79), pt(.72, .79), pt(.72, .46),
-        ]))
+        # 实心屋顶 + 描边墙体，小尺寸下比纯线框更易辨识
+        p.setBrush(c)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawPolygon(QPolygonF([pt(.1, .52), pt(.5, .16), pt(.9, .52)]))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(pen)
+        p.drawRect(QRectF(.24 * s, .5 * s, .52 * s, .32 * s))
     elif name == 'settings':
         for y, x in ((.3, .62), (.5, .38), (.7, .55)):
             p.drawLine(pt(.18, y), pt(.82, y))

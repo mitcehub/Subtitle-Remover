@@ -166,6 +166,9 @@ class MainWindow(QMainWindow):
                 except Exception:
                     text = "GPU (CUDA)"
             self._hw_label_ready.emit(text)
+        except Exception:
+            # 退出时控件可能已销毁，忽略即可
+            pass
         finally:
             self._hw_query_running = False
 
@@ -198,21 +201,30 @@ class MainWindow(QMainWindow):
 
     def load_window_position(self):
         try:
+            screen = self.screen().availableGeometry()
+            # 还原的尺寸不能超过可用桌面（高 DPI 缩放后 1246×810 会超出屏幕）
+            extra_h = max(0, self.frameGeometry().height() - self.height())
+            max_w = max(self.minimumWidth(), screen.width())
+            max_h = max(self.minimumHeight(), screen.height() - extra_h)
+
             x = config.windowX.value
             y = config.windowY.value
-            width = config.windowW.value
-            height = config.windowH.value
+            width = min(int(config.windowW.value or 1246), max_w)
+            height = min(int(config.windowH.value or 810), max_h)
 
             if x is None or y is None:
+                self.resize(width, height)
                 self.center_window()
                 return
 
-            screen_rect = QtWidgets.QApplication.primaryScreen().availableGeometry()
-            if (x >= 0 and y >= 0 and
-                    x + width <= screen_rect.width() and
-                    y + height <= screen_rect.height()):
+            x = int(x)
+            y = int(y)
+            if (x >= screen.left() and y >= screen.top() and
+                    x + width <= screen.right() + 1 and
+                    y + height <= screen.bottom() + 1 - extra_h):
                 self.setGeometry(x, y, width, height)
             else:
+                self.resize(width, height)
                 self.center_window()
         except Exception as e:
             logger.warning('window_position_load_failed: %s', e)
