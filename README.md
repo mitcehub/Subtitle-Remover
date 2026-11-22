@@ -18,6 +18,9 @@ Video-subtitle-remover (VSR) 是一款基于 AI 视频修复技术的硬字幕�
 - 处理中实时预览原片与结果对比，支持逐帧、变速播放与快捷键操作
 - PyQt6 现代界面，参数均可在设置面板中调整，无需手动改配置文件
 
+> **说明**：本项目与 [YaoFANGUK/video-subtitle-remover](https://github.com/YaoFANGUK/video-subtitle-remover)
+> 是同名但相互独立的项目，二者并非同一项目。
+
 ![Screenshot](doc/Screenshot.png)
 
 **使用说明：**

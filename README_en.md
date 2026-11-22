@@ -16,6 +16,9 @@ Key features:
 - Real-time original/result comparison during processing, with frame-by-frame and variable-speed playback
 - Modern PyQt6 UI with an advanced settings panel — adjust parameters without editing config files
 
+> **Note**: Despite sharing the same name, this project is independent of
+> [YaoFANGUK/video-subtitle-remover](https://github.com/YaoFANGUK/video-subtitle-remover). They are not the same project.
+
 ![Screenshot](doc/Screenshot.png)
 
 **Usage:**
