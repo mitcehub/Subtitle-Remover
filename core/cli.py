@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument('input', help='Input video path')
     parser.add_argument('-o', '--output', help='Output file path')
     parser.add_argument('--subtitle-area', type=str, default=None,
-                        help='Subtitle area coords: ymin,ymax,xmin,xmax (values in [0,1])')
+                        help='Subtitle area coords: ymin,ymax,xmin,xmax (normalized [0,1], converted to pixels)')
     args = parser.parse_args()
 
     # 校验输入文件存在
@@ -80,7 +80,17 @@ def main():
         sys.exit(-1)
 
     sr = SubtitleRemover(args.input)
-    sr.sub_areas = args.subtitle_area_coords
+    if args.subtitle_area_coords:
+        # CLI 传入的是归一化坐标 [0,1]，必须按视频实际分辨率转换为像素坐标，
+        # 否则会被 create_mask 当成像素值，区域几乎无效。
+        ymin, ymax, xmin, xmax = args.subtitle_area_coords[0]
+        H, W = sr.frame_height, sr.frame_width
+        sr.sub_areas = [(
+            int(round(ymin * H)), int(round(ymax * H)),
+            int(round(xmin * W)), int(round(xmax * W)),
+        )]
+    else:
+        sr.sub_areas = []
     if args.output:
         sr.video_out_path = args.output
     sr.run()

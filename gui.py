@@ -10,6 +10,7 @@ import sys
 import os
 import logging
 import multiprocessing
+import threading
 from PyQt6.QtCore import Qt
 from PyQt6 import QtCore, QtWidgets, QtGui
 from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout
@@ -78,6 +79,8 @@ logger.info('=' * 60)
 
 
 class SubtitleExtractorGUI(FluentWindow): 
+    _hw_label_ready = QtCore.pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         # 开启云母效果
@@ -108,9 +111,12 @@ class SubtitleExtractorGUI(FluentWindow):
     def _setup_titlebar_hardware(self):
         """在标题栏标题右侧添加硬件加速信息标签。"""
         from PyQt6.QtWidgets import QLabel
+        from PyQt6.QtCore import QTimer
 
         self._hw_label = QLabel(self.titleBar)
         self._hw_label.setStyleSheet("color: #999; font-size: 11px; font-weight: normal; background: transparent;")
+        self._hw_query_running = False
+        self._hw_label_ready.connect(self._hw_label.setText)
 
         self._refresh_hardware_label()
 
@@ -125,18 +131,50 @@ class SubtitleExtractorGUI(FluentWindow):
         except Exception:
             pass
 
+        # 定时刷新 VRAM 占用（仅 CUDA 模式有动态数值可刷）
+        # 刷新间隔 2 秒；开销极小（仅 torch.cuda.mem_get_info 一次调用）
+        self._hw_refresh_timer = QTimer(self)
+        self._hw_refresh_timer.setInterval(2000)
+        self._hw_refresh_timer.timeout.connect(self._refresh_hardware_label)
+        self._hw_refresh_timer.start()
+
     def _refresh_hardware_label(self):
-        """刷新标题栏硬件信息文本（读取当前配置 + 实际硬件）。"""
+        """刷新标题栏硬件信息文本（读取当前配置 + 实际硬件）。
+
+        nvidia-smi / torch 查询放到后台线程，避免每 2 秒阻塞 GUI 事件循环。
+        """
         from infra.hardware import HardwareAccelerator
         from infra.config import config
 
         hw = HardwareAccelerator.instance()
 
-        if config.hardwareAcceleration.value:
-            # GPU 模式
-            if hw.has_cuda():
-                import torch
+        if not config.hardwareAcceleration.value:
+            self._hw_label.setText("  CPU（GPU 加速已关闭）  ")
+            return
+        if hw.has_cuda():
+            if self._hw_query_running:
+                return
+            self._hw_query_running = True
+            threading.Thread(target=self._query_hardware_async, daemon=True).start()
+            return
+        if hw.has_mps():
+            text = "MPS (Apple GPU)"
+        elif hw.has_accelerator():
+            text = hw.accelerator_name
+        else:
+            text = "CPU（无 GPU 加速器）"
+        self._hw_label.setText(f"  {text}  ")
+
+    def _query_hardware_async(self):
+        """后台线程：查询系统级显存占用并通过信号回传主线程。"""
+        try:
+            gpu_name, vram_text = self._query_nvidia_smi()
+            if gpu_name and vram_text:
+                text = f"GPU: {gpu_name}  |  VRAM: {vram_text}"
+            else:
+                # nvidia-smi 不可用时回退到 torch（只看主进程 context）
                 try:
+                    import torch
                     gpu_name = torch.cuda.get_device_name(0)
                     free_b, total_b = torch.cuda.mem_get_info()
                     used_gb = (total_b - free_b) / (1024 ** 3)
@@ -144,16 +182,40 @@ class SubtitleExtractorGUI(FluentWindow):
                     text = f"GPU: {gpu_name}  |  VRAM: {used_gb:.1f}GB / {total_gb:.1f}GB"
                 except Exception:
                     text = "GPU (CUDA)"
-            elif hw.has_mps():
-                text = "MPS (Apple GPU)"
-            elif hw.has_accelerator():
-                text = hw.accelerator_name
-            else:
-                text = "CPU（无 GPU 加速器）"
-        else:
-            text = "CPU（GPU 加速已关闭）"
+            self._hw_label_ready.emit(f"  {text}  ")
+        finally:
+            self._hw_query_running = False
 
-        self._hw_label.setText(f"  {text}  ")
+    def _query_nvidia_smi(self):
+        """调用 nvidia-smi 查询系统级 GPU 名字和显存占用。
+
+        Returns:
+            (gpu_name, vram_text) 二元组；失败返回 (None, None)。
+            vram_text 形如 "12.3GB / 31.8GB"。
+        """
+        import subprocess, shutil
+        nvidia_smi = shutil.which('nvidia-smi')
+        if not nvidia_smi:
+            return None, None
+        try:
+            result = subprocess.run(
+                [nvidia_smi,
+                 '--query-gpu=name,memory.used,memory.total',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, timeout=3, text=True
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None, None
+            parts = result.stdout.strip().split(', ')
+            if len(parts) < 3:
+                return None, None
+            gpu_name = parts[0].strip()
+            used_mb = float(parts[1])
+            total_mb = float(parts[2])
+            vram_text = f"{used_mb/1024:.1f}GB / {total_mb/1024:.1f}GB"
+            return gpu_name, vram_text
+        except Exception:
+            return None, None
 
     def _connectSignalToSlot(self):
         config.appRestartSig.connect(self._showRestartTooltip)
@@ -213,7 +275,8 @@ class SubtitleExtractorGUI(FluentWindow):
     def closeEvent(self, event):
         """程序关闭时保存窗口位置并清理资源"""
         self.save_window_position()
-        # 停止主题监听线程
+        # 停止主题监听线程：darkdetect.listener 为阻塞循环，无协作退出接口，
+        # 只能用 terminate() 结束；wait 保证进程退出前线程已收尾。
         try:
             if self.themeListener and self.themeListener.isRunning():
                 self.themeListener.terminate()

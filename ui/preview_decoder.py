@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class PreviewDecoder:
-    def __init__(self, video_path, result_queue, max_cache=120):
+    # 预览上限宽度：缓存的是缩放后的帧，避免 4K 原图占满内存（120 帧 4K ≈ 3GB）
+    MAX_PREVIEW_WIDTH = 1280
+
+    def __init__(self, video_path, result_queue, max_cache=24):
         self.video_path = video_path
         self.queue = result_queue
         self.max_cache = max_cache
@@ -55,6 +58,7 @@ class PreviewDecoder:
             ret, frame = cap.read()
             if ret:
                 cap_pos = fi
+                frame = self._prepare(frame)
                 if len(self._order) >= self.max_cache:
                     old = self._order.pop(0)
                     self._cache.pop(old, None)
@@ -63,10 +67,22 @@ class PreviewDecoder:
                 self._put_result(fi, frame)
         cap.release()
 
+    @classmethod
+    def _prepare(cls, frame):
+        """缩放到预览上限宽度，控制缓存内存占用。"""
+        if frame is None:
+            return None
+        h, w = frame.shape[:2]
+        if w <= cls.MAX_PREVIEW_WIDTH:
+            return frame
+        scale = cls.MAX_PREVIEW_WIDTH / w
+        return cv2.resize(frame, (cls.MAX_PREVIEW_WIDTH, int(h * scale)),
+                          interpolation=cv2.INTER_AREA)
+
     def _put_result(self, fi, frame):
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
             except queue.Empty:
                 break
-        self.queue.put((fi, frame.copy()))
+        self.queue.put((fi, frame))

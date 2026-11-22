@@ -20,8 +20,9 @@ if os.path.isfile(_MODEL_PATH_FIXED):
     MODEL_PATH = _MODEL_PATH_FIXED
 else:
     _MODEL_EXTS = ('.pt', '.pth', '.ckpt', '.bin')
+    _STTN_FILES = os.listdir(_STTN_DIR) if os.path.isdir(_STTN_DIR) else []
     MODEL_PATH = next(
-        (os.path.join(_STTN_DIR, f) for f in os.listdir(_STTN_DIR)
+        (os.path.join(_STTN_DIR, f) for f in _STTN_FILES
          if os.path.splitext(f)[1].lower() in _MODEL_EXTS and not f.endswith('.bak')),
         _MODEL_PATH_FIXED  # fallback — will fail with clear error at load time
     )
@@ -36,6 +37,17 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 @unique
 class InpaintMode(Enum):
     STTN_AUTO = "sttn-auto"
+    E2FGVI = "e2fgvi"
+    PROPAINTER = "propainter"
+
+# ============================================================================
+# 模型路径（三个模型均为内嵌推理，权重随项目分发；可在 config.json 的 Models 段覆盖）
+# ============================================================================
+
+DEFAULT_E2FGVI_CKPT = os.path.join(
+    BASE_DIR, 'core', 'inpaint', 'models', 'e2fgvi', 'gen_400000.pth')
+DEFAULT_PROPAINTER_CKPT = os.path.join(
+    BASE_DIR, 'core', 'inpaint', 'models', 'propainter', 'gen_310020.pt')
 
 # ============================================================================
 # Config 类
@@ -47,16 +59,12 @@ from qfluentwidgets import (qconfig, ConfigItem, QConfig, OptionsValidator, Bool
 
 
 class Config(QConfig):
+    # 仅列出实际随项目分发的翻译文件，避免选择后静默回退中文
     interfaceTexts = {
         '简体中文': 'ch',
-        '繁體中文': 'chinese_cht',
         'English': 'en',
-        '한국어': 'ko',
-        '日本語': 'japan',
-        'Tiếng Việt': 'vi',
-        'Español': 'es'
     }
-    interface = OptionsConfigItem("Window", "Interface", "ChineseSimplified",
+    interface = OptionsConfigItem("Window", "Interface", "ch",
                                   OptionsValidator(interfaceTexts.values()), restart=True)
 
     windowX = ConfigItem("Window", "X", None)
@@ -69,9 +77,26 @@ class Config(QConfig):
     inpaintMode = OptionsConfigItem("Main", "InpaintMode", InpaintMode.STTN_AUTO,
                                     OptionsValidator(InpaintMode), EnumSerializer(InpaintMode))
 
-    sttnNeighborStride = RangeConfigItem("Sttn", "NeighborStride", 5, RangeValidator(1, 100))
-    sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(1, 100))
-    sttnMaxLoadNum = RangeConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(1, 300))
+    e2fgviCheckpoint = ConfigItem("Models", "E2FGVICheckpoint", DEFAULT_E2FGVI_CKPT)
+    propainterCheckpoint = ConfigItem("Models", "ProPainterCheckpoint", DEFAULT_PROPAINTER_CKPT)
+    sttnCheckpoint = ConfigItem("Models", "STTNCheckpoint", MODEL_PATH)
+
+    # 约束：NeighborStride × ReferenceLength ≤ MaxLoadNum 下限(50)，
+    # 避免 sttn.py 运行时静默抬升 chunk 大小导致 UI 显示值与实际不符。
+    # 当前 5 × 10 = 50，正好等于 MaxLoadNum 下限。
+    # 区间规则：默认值固定为「最低效果/最低开销」一端，只允许朝提高效果的方向调整。
+    # 数值越大效果越好的参数：默认值即下限；数值越小效果越好的参数：默认值即上限。
+    sttnNeighborStride = RangeConfigItem("Sttn", "NeighborStride", 5, RangeValidator(2, 5))
+    sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(2, 10))
+    sttnMaxLoadNum = RangeConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(50, 300))
+
+    e2fgviMaxFrames = RangeConfigItem("E2FGVI", "MaxFrames", 150, RangeValidator(150, 300))
+    e2fgviNeighborStride = RangeConfigItem("E2FGVI", "NeighborStride", 5, RangeValidator(2, 5))
+    e2fgviReferenceLength = RangeConfigItem("E2FGVI", "ReferenceLength", 10, RangeValidator(2, 10))
+
+    propainterLocalFrames = RangeConfigItem("ProPainter", "LocalFrames", 10, RangeValidator(10, 20))
+    propainterReferenceFrames = RangeConfigItem("ProPainter", "ReferenceFrames", 10, RangeValidator(10, 20))
+    propainterStride = RangeConfigItem("ProPainter", "Stride", 5, RangeValidator(1, 5))
 
     def get_sttn_max_load_num(self):
         return max(self.sttnMaxLoadNum.value, self.sttnNeighborStride.value * self.sttnReferenceLength.value)

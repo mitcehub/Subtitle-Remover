@@ -23,25 +23,31 @@ if sys.platform == 'win32':
     _last_wheel_delta = 0
     _hook_handle = None
     _hook_callback = None
+    _hook_refs = 0
 
 
     def _get_msg_proc(nCode, wParam, lParam):
         global _last_wheel_delta
-        if nCode >= 0:
-            msg = ctypes.cast(lParam, ctypes.POINTER(wintypes.MSG)).contents
-            if msg.message == 0x020A:  # WM_MOUSEWHEEL
-                w_param = ctypes.c_ulong(msg.wParam).value
-                z_delta = (w_param >> 16) & 0xFFFF
-                if z_delta >= 0x8000:
-                    z_delta -= 0x10000
-                alt_down = bool(ctypes.windll.user32.GetAsyncKeyState(0x12) & 0x8000)
-                if alt_down:
-                    _last_wheel_delta = z_delta
+        if nCode >= 0 and lParam:
+            try:
+                msg = ctypes.cast(lParam, ctypes.POINTER(wintypes.MSG)).contents
+                if msg.message == 0x020A:  # WM_MOUSEWHEEL
+                    w_param = ctypes.c_ulong(msg.wParam).value
+                    z_delta = (w_param >> 16) & 0xFFFF
+                    if z_delta >= 0x8000:
+                        z_delta -= 0x10000
+                    alt_down = bool(ctypes.windll.user32.GetAsyncKeyState(0x12) & 0x8000)
+                    if alt_down:
+                        _last_wheel_delta = z_delta
+            except Exception:
+                # 钩子回调中的任何异常都会污染 Windows 消息循环，这里必须吞掉
+                pass
         return ctypes.windll.user32.CallNextHookEx(0, nCode, wParam, lParam)
 
 
     def _install_hook():
-        global _hook_handle, _hook_callback
+        global _hook_handle, _hook_callback, _hook_refs
+        _hook_refs += 1
         if _hook_handle is not None:
             return
         _hook_callback = _GetMsgProc(_get_msg_proc)
@@ -58,7 +64,10 @@ if sys.platform == 'win32':
 
 
     def _uninstall_hook():
-        global _hook_handle, _hook_callback
+        global _hook_handle, _hook_callback, _hook_refs
+        _hook_refs = max(0, _hook_refs - 1)
+        if _hook_refs > 0:
+            return
         if _hook_handle:
             ctypes.windll.user32.UnhookWindowsHookEx(_hook_handle)
             _hook_handle = None
@@ -119,6 +128,7 @@ class TimelineWidget(QWidget):
         self._preview_frame = None
 
         _install_hook()
+        self.destroyed.connect(lambda *_: _uninstall_hook())
 
     def _update_fixed_height(self):
         self.setMinimumHeight(max(80, self._total_content_h()))
@@ -256,8 +266,14 @@ class TimelineWidget(QWidget):
         # 次刻度间距（主间隔约 5 等分）
         sub_frames = max(1, major_frames // 5) if major_frames > 5 else 1
 
-        frame = 1
-        while frame <= self.frame_count:
+        # 只绘制可见范围内的刻度，避免 frame_count 很大时逐帧循环（O(frame_count)）
+        first_frame = max(1, self._x_to_frame(self.h_margin) - sub_frames)
+        last_frame = min(self.frame_count,
+                         self._x_to_frame(self.width() - self.h_margin) + sub_frames)
+        if last_frame < first_frame:
+            return
+        start_frame = 1 + ((first_frame - 1) // sub_frames) * sub_frames
+        for frame in range(start_frame, last_frame + 1, sub_frames):
             x = self._frame_to_x(frame)
             if self.h_margin <= x <= self.width() - self.h_margin:
                 is_major = (frame - 1) % major_frames == 0
@@ -268,10 +284,9 @@ class TimelineWidget(QWidget):
                     p.setPen(QColor("#aaa"))
                     tw = fm.horizontalAdvance(label)
                     p.drawText(int(x) - tw // 2, 13, label)
-                elif (frame - 1) % sub_frames == 0:
+                else:
                     p.setPen(QPen(QColor("#555"), 1))
                     p.drawLine(int(x), y - 4, int(x), y)
-            frame += sub_frames
 
     def _draw_tracks(self, p, fm):
         for i, track in enumerate(self.tracks):

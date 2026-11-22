@@ -43,9 +43,9 @@ class FFmpegVideoWriter:
         )
         self._returncode = None
         self._frames_written = 0
-        self._last_frame = None
         self._size = (w, h)
         self._broken = False
+        self._failed = False
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
         logger.info('video_writer_initialized: path=%s, fps=%s, %dx%d', output_path, fps, w, h)
@@ -63,39 +63,37 @@ class FFmpegVideoWriter:
         """写入一帧（numpy BGR 数组）。"""
         if self._broken:
             raise RuntimeError('FFmpegVideoWriter: pipe broken, write aborted')
+        if frame is None or getattr(frame, 'shape', None) is None:
+            raise ValueError('FFmpegVideoWriter.write received an empty frame')
+        if frame.ndim == 2:
+            frame = np.stack([frame] * 3, axis=-1)
+        if frame.shape[0] != self._size[1] or frame.shape[1] != self._size[0]:
+            raise ValueError(
+                f'FFmpegVideoWriter frame size mismatch: got {frame.shape[1]}x{frame.shape[0]}, '
+                f'expected {self._size[0]}x{self._size[1]}')
         if frame.dtype != np.uint8:
             frame = np.clip(frame, 0, 255).astype(np.uint8)
         try:
             self._process.stdin.write(frame.tobytes())
         except BrokenPipeError:
-            logger.warning('video_writer_broken_pipe: frames_written=%d', self._frames_written)
             self._broken = True
-            return
+            self._failed = True
+            logger.error('video_writer_broken_pipe: frames_written=%d', self._frames_written)
+            raise RuntimeError('FFmpegVideoWriter: pipe broken (ffmpeg exited early)')
         self._frames_written += 1
-        self._last_frame = frame
 
     @property
     def frames_written(self):
         return self._frames_written
 
-    def pad_to(self, target_count):
-        """用最后一帧补齐到 target_count 帧。"""
-        if self._last_frame is None:
-            logger.warning('video_writer_pad_no_frames')
-            return
-        missing = target_count - self._frames_written
-        if missing <= 0:
-            return
-        logger.info('video_writer_padding: missing=%d, before=%d, target=%d', missing, self._frames_written, target_count)
-        # 缓存 tobytes 避免循环内重复序列化
-        frame_bytes = self._last_frame.tobytes()
-        for _ in range(missing):
-            try:
-                self._process.stdin.write(frame_bytes)
-            except BrokenPipeError:
-                logger.warning('video_writer_pad_error: padded=%d', self._frames_written - (target_count - missing))
-                break
-            self._frames_written += 1
+    @property
+    def failed(self):
+        """FFmpeg 是否异常退出（非 0）或管道已断开。"""
+        return self._failed
+
+    @property
+    def returncode(self):
+        return self._returncode
 
     def release(self):
         """关闭管道并等待编码完成。"""
@@ -110,8 +108,15 @@ class FFmpegVideoWriter:
         except subprocess.TimeoutExpired:
             logger.warning('video_writer_timeout: terminating')
             self._process.terminate()
-            self._process.wait(timeout=5)
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.error('video_writer_terminate_timeout')
+                self._failed = True
         self._returncode = self._process.returncode
+        if self._returncode not in (0, None) and not self._broken:
+            self._failed = True
+            logger.error('video_writer_failed: rc=%s', self._returncode)
         logger.info('video_writer_released: frames=%d, rc=%s, size=%s', self._frames_written, self._returncode, self._size)
 
     def __enter__(self):

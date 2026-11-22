@@ -21,16 +21,17 @@ FFMPEG_VERSION_TIMEOUT = 5
 FFMPEG_PROBE_TIMEOUT = 60
 FFMPEG_LONG_TIMEOUT = 600
 
-# 拒绝 shell 注入字符：; | & ` $ ( ) \n \r ! \0
-_PATH_DANGER_CHARS = re.compile(r'[;|&`$()\n\r!\x00]')
+# 拒绝空字符（subprocess 不接受 \0）。其余字符在 shell=False + 参数列表下无注入风险，
+# 不应拒绝合法路径（如 "C:\Program Files (x86)"、"A&B"、"video(2024).mp4"）。
+_PATH_DANGER_CHARS = re.compile(r'\x00')
 
 
 def _validate_path(path):
-    """校验文件路径，防止命令注入。拒绝包含 shell 元字符的路径。"""
+    """校验文件路径。subprocess 使用参数列表且 shell=False，无需过滤 shell 元字符。"""
     if not path or not isinstance(path, str):
         raise ValueError(f"Invalid path: {path!r}")
     if _PATH_DANGER_CHARS.search(path):
-        raise ValueError(f"Path contains potentially dangerous characters: {path!r}")
+        raise ValueError(f"Path contains invalid characters: {path!r}")
     return path
 
 
@@ -148,11 +149,15 @@ def merge_audio_to_video(video_path, video_out_path, output_path, ffmpeg_path):
         logger.warning('audio_merge_skipped: temp not found %s', video_out_path)
         return False
 
+    # 中间音频统一重编码为 AAC：源音轨可能是 MP3/AC3/DTS/FLAC 等，
+    # 直接 -acodec copy 写成 .aac 会失败并导致音频被丢弃。
     temp = tempfile.NamedTemporaryFile(suffix='.aac', delete=False)
+    temp_name = temp.name
+    temp.close()  # 必须先关闭句柄，否则 Windows 上 ffmpeg 无法写入同一路径
     audio_extract_command = [ffmpeg_path,
                              "-y", "-i", video_path,
-                             "-acodec", "copy",
-                             "-vn", "-loglevel", "error", temp.name]
+                             "-vn", "-c:a", "aac", "-b:a", "192k",
+                             "-loglevel", "error", temp_name]
     use_shell = False
     logger.info('audio_extract_start: %s', video_path)
     try:
@@ -176,12 +181,12 @@ def merge_audio_to_video(video_path, video_out_path, output_path, ffmpeg_path):
         return False
     else:
         if os.path.exists(video_out_path):
-            logger.info('audio_merge_start: audio=%s, output=%s', temp.name, output_path)
+            logger.info('audio_merge_start: audio=%s, output=%s', temp_name, output_path)
             _validate_path(video_out_path)
             _validate_path(output_path)
             audio_merge_command = [ffmpeg_path,
                                    "-y", "-i", video_out_path,
-                                   "-i", temp.name,
+                                   "-i", temp_name,
                                    "-vcodec", "copy",
                                    "-acodec", "copy",
                                    "-loglevel", "error", output_path]
@@ -196,13 +201,8 @@ def merge_audio_to_video(video_path, video_out_path, output_path, ffmpeg_path):
         logger.warning('audio_merge_skipped: temp not found %s', video_out_path)
         return False
     finally:
-        # 必须先关闭句柄再删除文件，否则 Windows 上会 PermissionError
-        try:
-            temp.close()
-        except Exception:
-            pass
-        if os.path.exists(temp.name):
+        if os.path.exists(temp_name):
             try:
-                os.remove(temp.name)
+                os.remove(temp_name)
             except Exception:
                 pass

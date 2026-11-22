@@ -147,6 +147,22 @@ python gui.py
 | SttnReferenceLength | 参考帧长度，调大效果变好但显存占用增加 |
 | SttnMaxLoadNum | 最大同时处理的帧数量 |
 
+2. 三种处理模型怎么切换
+
+   `Main -> InpaintMode` 可选择 `STTN`、`E2FGVI`、`ProPainter`。三者均为本地内嵌推理，
+   权重随项目分发，无需训练仓库；如需替换权重，可在 `Models` 配置段指定：
+
+```json
+"Models": {
+  "STTNCheckpoint": "core/inpaint/models/sttn/sttn.pt",
+  "E2FGVICheckpoint": "core/inpaint/models/e2fgvi/gen_400000.pth",
+  "ProPainterCheckpoint": "core/inpaint/models/propainter/gen_310020.pt"
+}
+```
+
+   ProPainter 还需要同目录下的 `raft-things.pth` 光流权重（默认自动查找）。
+   三个模型都会按当前选区裁剪后推理，再只把该区域写回；AB 区间外恢复原视频。
+
 ## 致谢
 
 本程序使用了 [YaoFANGUK/video-subtitle-remover](https://github.com/YaoFANGUK/video-subtitle-remover) 的部分代码，感谢原作者的贡献。

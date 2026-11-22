@@ -4,6 +4,7 @@ import queue
 import threading
 import traceback
 import logging
+import types
 from pathlib import Path
 from datetime import datetime
 
@@ -22,7 +23,7 @@ from infra.config import config, tr
 from infra.process_manager import ProcessManager
 from infra.utils import get_readable_path
 from core.video_io.video_reader import create_video_capture
-from core.inpaint.mask import get_tight_inpaint_area
+from core.inpaint.region import get_tight_inpaint_area
 from ui.preview_decoder import PreviewDecoder
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,6 @@ class HomeInterface(QWidget):
         self.frame_count = None
         self.frame_width = None
         self.frame_height = None
-        self.se = None
         self.current_mode = self.MODE_COMPARE
         self.display_mode = self.DISPLAY_FIT
         self._has_processed = False
@@ -61,13 +61,14 @@ class HomeInterface(QWidget):
         self.auto_scroll = True
         self._stop_event = threading.Event()
         self._worker_thread = None
+        # 任务代号：每次开始/停止自增，用于丢弃旧任务迟到的回调
+        self._task_generation = 0
         self.running_process = None
         self._video_cap_lock = threading.Lock()
 
         # 存储最后一帧原片和处理结果（供 Compare 模式使用）
         self._last_ori_frame = None
         self._last_comp_frame = None
-        self._result_frame = None
         self._preview_decoder = None
         self._preview_queue = queue.Queue(maxsize=2)
         self._proc_pid = None
@@ -194,6 +195,7 @@ class HomeInterface(QWidget):
         self.timeline = TimelineWidget(self)
         self.timeline.frame_selected.connect(self._on_timeline_frame_selected)
         self.timeline.preview_seek.connect(self._on_preview_seek)
+        self.timeline.track_range_changed.connect(self._on_track_range_changed)
         # 不持久化轨道数据到配置文件，开新视频时自动清空
         center_layout.addWidget(self.timeline, 0)
 
@@ -267,10 +269,11 @@ class HomeInterface(QWidget):
     def _update_time_label(self, frame_num, fps, total_frames):
         if fps <= 0 or total_frames <= 0:
             return
+        fps_int = max(1, int(round(fps)))
         def tc(fn):
             fn_0 = max(0, min(fn - 1, (total_frames or 1) - 1))
-            sec = int(fn_0 / fps)
-            fr = int(fn_0 % fps)
+            sec = fn_0 // fps_int
+            fr = fn_0 % fps_int
             m, s = divmod(sec, 60)
             h, m = divmod(m, 60)
             if h > 0:
@@ -301,7 +304,6 @@ class HomeInterface(QWidget):
         self._has_processed = False
         self._last_ori_frame = None
         self._last_comp_frame = None
-        self._result_frame = None
         self.output_path = None
         self._playback._playback_speed = 1
         self.speed_btn.setIcon(MyFluentIcon.Speed1x)
@@ -346,26 +348,34 @@ class HomeInterface(QWidget):
 
     def _playback_tick(self):
         """播放定时器回调：顺序读取帧避免闪跳，播放结束后重置以允许重新播放。"""
+        # 处理中 worker 可能正在释放/重建 VideoCapture，跳过本次 tick 避免跨线程竞态
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
         if self.current_mode == self.MODE_COMPARE:
             # Compare 模式：顺序读取两个 cap（不再每帧 seek，避免闪跳）
-            ori_cap = self.video_cap
-            comp_cap = self.output_cap if (self._has_processed and self.output_cap and self.output_cap.isOpened()) else None
-            if ori_cap is None or not ori_cap.isOpened():
-                self._playback.stop()
-                return
-            ret_ori, ori_frame = ori_cap.read()
-            ret_comp, comp_frame = (False, None)
-            if comp_cap and comp_cap.isOpened():
-                ret_comp, comp_frame = comp_cap.read()
-            if not ret_ori:
-                # 播放结束：重置到开头以允许重新播放
-                self._playback.stop()
+            with self._video_cap_lock:
+                ori_cap = self.video_cap
+                comp_cap = self.output_cap if (
+                    self._has_processed and self.output_cap and self.output_cap.isOpened()) else None
+                if ori_cap is None or not ori_cap.isOpened():
+                    self._playback.stop()
+                    return
+                ret_ori, ori_frame = ori_cap.read()
+                ret_comp, comp_frame = (False, None)
+                if comp_cap and comp_cap.isOpened():
+                    ret_comp, comp_frame = comp_cap.read()
+                if not ret_ori:
+                    # 播放结束：重置到开头以允许重新播放（setValue 需在锁外，避免重入死锁）
+                    self._playback.stop()
+                    ori_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    if comp_cap:
+                        comp_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    fi = None
+                else:
+                    fi = int(ori_cap.get(cv2.CAP_PROP_POS_FRAMES))
+            if fi is None:
                 self.video_slider.setValue(1)
-                ori_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                if comp_cap:
-                    comp_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 return
-            fi = int(ori_cap.get(cv2.CAP_PROP_POS_FRAMES))
             if ori_frame is not None:
                 self._last_ori_frame = ori_frame
             if comp_frame is not None:
@@ -383,18 +393,23 @@ class HomeInterface(QWidget):
             self.timeline.set_current_frame(fi)
             return
         # Single 模式：顺序读取（不 seek），流畅播放
-        cap = self.output_cap if (self._has_processed and self.output_cap and self.output_cap.isOpened()) else self.video_cap
-        if cap is None or not cap.isOpened():
-            self._playback.stop()
-            return
-        ret, frame = cap.read()
-        if not ret:
-            # 播放结束：重置到开头以允许重新播放
-            self._playback.stop()
+        with self._video_cap_lock:
+            cap = self.output_cap if (
+                self._has_processed and self.output_cap and self.output_cap.isOpened()) else self.video_cap
+            if cap is None or not cap.isOpened():
+                self._playback.stop()
+                return
+            ret, frame = cap.read()
+            if not ret:
+                # 播放结束：重置到开头以允许重新播放（setValue 需在锁外，避免重入死锁）
+                self._playback.stop()
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                fi = None
+            else:
+                fi = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        if fi is None:
             self.video_slider.setValue(1)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             return
-        fi = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
         if self.fps and self.frame_count:
             self._update_time_label(fi, self.fps, self.frame_count)
         self.video_slider.blockSignals(True)
@@ -435,11 +450,12 @@ class HomeInterface(QWidget):
                     if not ret:
                         ori_frame = None
             comp_frame = None
-            if self.output_cap and self.output_cap.isOpened():
-                self.output_cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, value - 1))
-                ret, comp_frame = self.output_cap.read()
-                if not ret:
-                    comp_frame = None
+            with self._video_cap_lock:
+                if self.output_cap and self.output_cap.isOpened():
+                    self.output_cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, value - 1))
+                    ret, comp_frame = self.output_cap.read()
+                    if not ret:
+                        comp_frame = None
             # 处理中缓存帧兜底
             if ori_frame is None and self._last_ori_frame is not None:
                 ori_frame = self._last_ori_frame
@@ -453,16 +469,19 @@ class HomeInterface(QWidget):
                 self.video_display_component.update_video_display(ori_frame, draw_selection=False)
             return
 
-        cap = self.output_cap if (self._has_processed and self.output_cap and self.output_cap.isOpened()) else self.video_cap
+        cap = None
         frame = None
-        if cap is not None and cap.isOpened():
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, value - 1))
-            ret, frame = cap.read()
-            if not ret:
-                frame = None
-                logger.debug('slider_changed: frame=%d seek failed', value)
-        else:
-            logger.debug('slider_changed: cap not available for frame=%d', value)
+        with self._video_cap_lock:
+            cap = self.output_cap if (
+                self._has_processed and self.output_cap and self.output_cap.isOpened()) else self.video_cap
+            if cap is not None and cap.isOpened():
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, value - 1))
+                ret, frame = cap.read()
+                if not ret:
+                    frame = None
+                    logger.debug('slider_changed: frame=%d seek failed', value)
+            else:
+                logger.debug('slider_changed: cap not available for frame=%d', value)
         if frame is not None:
             self.update_preview(frame)
         else:
@@ -486,6 +505,10 @@ class HomeInterface(QWidget):
         return cv2.hconcat([frame_a, frame_b])
 
     def load_video(self, video_path):
+        if self._worker_thread and self._worker_thread.is_alive():
+            logger.warning('video_load_rejected_while_processing: %s', video_path)
+            self.append_output('正在处理中，无法打开新视频，请先停止当前任务')
+            return False
         logger.info('video_load_start: %s', video_path)
         self.video_path = video_path
         with self._video_cap_lock:
@@ -542,6 +565,11 @@ class HomeInterface(QWidget):
 
     def _on_tracks_changed(self, _ignored=None):
         self.timeline.set_data(self.video_display_component.get_tracks(), self.frame_count or 1, self.fps or 30)
+        self.timeline.set_current_frame(self.video_slider.value())
+
+    def _on_track_range_changed(self, _track_id, _start, _end):
+        """时间轴拖动轨道边界：轨道字典为共享引用，这里刷新画面选框。"""
+        self.video_display_component.update_preview_with_rect()
         self.timeline.set_current_frame(self.video_slider.value())
 
     def _on_timeline_frame_selected(self, frame):
@@ -610,7 +638,13 @@ class HomeInterface(QWidget):
         self.video_display_component.set_dragger_enabled(False)
         self.timeline.setEnabled(False)
         self._set_playback_buttons_enabled(False)
+        # 处理期间禁止打开新视频，避免旧任务用新 video_path 配旧 output_path
+        self.file_button.setEnabled(False)
         self.video_display_component.show_status(tr['Main']['WaitRendering'])
+
+        # 新任务代号：旧 worker 迟到的回调会被丢弃
+        self._task_generation += 1
+        generation = self._task_generation
 
         # STTN 模式固定使用框选区域遮罩，双窗口直接对比
         self.current_mode = self.MODE_COMPARE
@@ -673,7 +707,9 @@ class HomeInterface(QWidget):
                     logger.error('processing_task_error: %s', traceback.format_exc())
                     self.append_log_signal.emit([f"Error: {e}"])
                 finally:
-                    self.toggle_buttons_signal.emit(True)
+                    # 只有当前任务才能恢复 UI，避免旧任务干扰新任务
+                    if generation == self._task_generation:
+                        self.toggle_buttons_signal.emit(True)
 
             self._worker_thread = threading.Thread(target=task, daemon=True)
             self._worker_thread.start()
@@ -685,6 +721,8 @@ class HomeInterface(QWidget):
     def stop_button_clicked(self):
         try:
             self._stop_event.set()
+            # 使旧任务的迟到回调失效
+            self._task_generation += 1
             self.append_output(tr['Main']['StopProcessing'])
             logger.info('user_stop_processing')
             # 通过 ProcessManager 统一终止子进程
@@ -694,8 +732,17 @@ class HomeInterface(QWidget):
             if self._pipeline:
                 self._pipeline.stop()
         finally:
+            # 必须 join 旧 worker，否则 is_alive() 守卫失效且旧信号会污染新任务
+            worker = self._worker_thread
+            if worker is not None and worker.is_alive():
+                worker.join(timeout=5)
+                if worker.is_alive():
+                    logger.warning('worker_thread_still_alive_after_stop')
             self._proc_pid = None
             self._worker_thread = None
+            self.file_button.setEnabled(True)
+            self._reopen_video_cap()
+            self.slider_changed(self.video_slider.value())
             self.video_display_component.hide_status()
             self.video_display_component.set_dragger_enabled(True)
             self.timeline.setEnabled(True)
@@ -708,25 +755,44 @@ class HomeInterface(QWidget):
         self.run_button.setVisible(show_run)
         self.stop_button.setVisible(not show_run)
         if show_run:
+            self.file_button.setEnabled(True)
             self.video_display_component.hide_status()
             self.video_display_component.set_dragger_enabled(True)
             self.timeline.setEnabled(True)
             self._set_playback_buttons_enabled(True)
+            # 处理失败/停止时 video_cap 已被释放，这里恢复源视频句柄
+            self._reopen_video_cap()
+
+    def _reopen_video_cap(self):
+        if not self.video_path:
+            return
+        if self.video_cap is not None and self.video_cap.isOpened():
+            return
+        try:
+            with self._video_cap_lock:
+                self.video_cap = create_video_capture(self.video_path)
+        except Exception:
+            logger.exception('video_cap_reopen_failed')
 
     # ==================== 子进程处理 ====================
 
     def run_subtitle_remover_process(self, video_path, output_path, options):
-        from dataclasses import dataclass
-        @dataclass
-        class Callbacks:
-            on_progress = self.progress_signal.emit
-            on_log = self.append_log_signal.emit
-            on_preview = self.update_preview_with_comp_signal.emit
-            on_error = self.task_error_signal.emit
-        result = self._pipeline.start(video_path, output_path, options, Callbacks())
-        if result and hasattr(result, 'pid'):
-            self._proc_pid = result.pid
-        return result
+        callbacks = types.SimpleNamespace(
+            on_progress=self.progress_signal.emit,
+            on_log=self.append_log_signal.emit,
+            on_preview=self.update_preview_with_comp_signal.emit,
+            on_error=self.task_error_signal.emit,
+        )
+        return self._pipeline.start(
+            video_path, output_path, options, callbacks,
+            on_started=self._on_process_started,
+            stop_event=self._stop_event,
+        )
+
+    def _on_process_started(self, process):
+        # 在 process.start() 之后、join() 之前记录 PID，否则处理期间 _proc_pid 恒为 None，无法按 PID 停止
+        self._proc_pid = getattr(process, 'pid', None)
+        logger.info('worker_process_started: pid=%s', self._proc_pid)
 
     # ==================== 进度 / 日志 / 错误 ====================
 
@@ -762,22 +828,23 @@ class HomeInterface(QWidget):
         logger.info('  output_path=%s', self.output_path)
         self.run_button.setVisible(True)
         self.stop_button.setVisible(False)
+        self.file_button.setEnabled(True)
         self.video_display_component.hide_status()
         self._set_playback_buttons_enabled(True)
-        self.se = None
 
         if self.output_path and os.path.exists(self.output_path):
             logger.info('output_video_open_start')
             self._has_processed = True
-            if self.output_cap:
-                self.output_cap.release()
-            self.output_cap = create_video_capture(get_readable_path(self.output_path))
-            if self.output_cap.isOpened():
-                logger.info('output_video_opened')
-            else:
-                logger.warning('output_video_open_failed')
-                self.output_cap = None
-                self._has_processed = False
+            with self._video_cap_lock:
+                if self.output_cap:
+                    self.output_cap.release()
+                self.output_cap = create_video_capture(get_readable_path(self.output_path))
+                if self.output_cap.isOpened():
+                    logger.info('output_video_opened')
+                else:
+                    logger.warning('output_video_open_failed')
+                    self.output_cap = None
+                    self._has_processed = False
 
         logger.info('source_video_reopen')
         with self._video_cap_lock:
@@ -802,10 +869,7 @@ class HomeInterface(QWidget):
         self._update_time_label(1, self.fps, self.frame_count)
 
         # 刷新当前视图
-        if self._has_processed and hasattr(self, '_result_frame') and self._result_frame is not None:
-            self.update_preview(self._result_frame)
-        else:
-            self.slider_changed(self.video_slider.value())
+        self.slider_changed(self.video_slider.value())
         # 处理完成后不再需要预览解码器（源视频），使用输出视频直接播放
         self._stop_preview_decoder()
 
@@ -829,7 +893,7 @@ class HomeInterface(QWidget):
             color = '#2980b9'
         html = f'<span style="color:#888;">[{timestamp}]</span> <span style="color:{color};">{escaped}</span><br>'
         self.output_text.append(html)
-        print(*args)
+        logger.info('output_log: %s', ' '.join(str(a) for a in args))
         if self.auto_scroll:
             sb = self.output_text.verticalScrollBar()
             sb.setValue(sb.maximum())
@@ -848,7 +912,14 @@ class HomeInterface(QWidget):
     @pyqtSlot(list)
     def update_preview_with_comp(self, args):
         """处理中实时预览"""
+        if not args or len(args) < 2:
+            return
         frame_ori, frame_comp = args
+        if frame_ori is None or frame_comp is None:
+            return
+        # 只有处理仍在进行时才更新预览，避免停止后到达的排队信号再次禁用拖拽
+        if not (self._worker_thread and self._worker_thread.is_alive()):
+            return
         self._last_ori_frame = frame_ori
         self._last_comp_frame = frame_comp
 
@@ -978,15 +1049,16 @@ class HomeInterface(QWidget):
             self.video_display_component.tracks_changed.disconnect(self._on_tracks_changed)
             self.timeline.frame_selected.disconnect(self._on_timeline_frame_selected)
             self.timeline.preview_seek.disconnect(self._on_preview_seek)
+            self.timeline.track_range_changed.disconnect(self._on_track_range_changed)
             self._stop_preview_decoder()
 
             with self._video_cap_lock:
                 if self.video_cap:
                     self.video_cap.release()
                     self.video_cap = None
-            if self.output_cap:
-                self.output_cap.release()
-                self.output_cap = None
+                if self.output_cap:
+                    self.output_cap.release()
+                    self.output_cap = None
         except Exception as e:
             logger.warning('close_event_error: %s', e)
         super().closeEvent(event)

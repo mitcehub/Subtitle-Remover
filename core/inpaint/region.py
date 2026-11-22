@@ -18,13 +18,16 @@ def create_mask(size, coords_list):
         coords_list: 坐标列表，每个元素为 (ymin, ymax, xmin, xmax)
     """
     mask = np.zeros(size, dtype="uint8")
+    H, W = size
     if coords_list:
         for coords in coords_list:
-            ymin, ymax, xmin, xmax = coords
+            ymin, ymax, xmin, xmax = (int(v) for v in coords)
             x1 = max(0, xmin - MASK_DEVIATION)
             y1 = max(0, ymin - MASK_DEVIATION)
-            x2 = xmax + MASK_DEVIATION
-            y2 = ymax + MASK_DEVIATION
+            x2 = min(W - 1, xmax + MASK_DEVIATION)
+            y2 = min(H - 1, ymax + MASK_DEVIATION)
+            if x2 <= x1 or y2 <= y1:
+                continue
             cv2.rectangle(mask, (x1, y1), (x2, y2), (255, 255, 255), thickness=-1)
     area_px = int(np.sum(mask > 0))
     total_px = size[0] * size[1]
@@ -165,20 +168,18 @@ def get_tight_inpaint_area(coords_list, W, H, padding=TIGHT_PADDING,
     return areas
 
 
-def get_inpaint_area_by_mask(W, H, h, mask, multiple=1):
+def get_inpaint_area_by_mask(W, H, h, mask):
     """
-    获取字幕去除区域，根据mask来确定需要填补的区域和高度，
-    并根据模型要求调整区域大小为指定倍数
+    获取字幕去除区域，根据mask来确定需要填补的区域和高度
 
     Args:
         W: 图像宽度
         H: 图像高度
         h: 检测区域高度
         mask: 遮罩图像
-        multiple: 区域尺寸需要满足的倍数，默认为1
 
     Returns:
-        调整后的绘画区域列表，格式为[(ymin, ymax, xmin, xmax), ...]
+        绘画区域列表，格式为[(ymin, ymax, xmin, xmax), ...]
     """
     inpaint_area = []
 
@@ -274,37 +275,6 @@ def get_inpaint_area_by_mask(W, H, h, mask, multiple=1):
 
         xmin = 0
         xmax = W
-
-        if multiple > 1:
-            height = ymax - ymin
-            remainder = height % multiple
-
-            if remainder != 0:
-                adjust_pixels = multiple - remainder
-                center_y = (ymin + ymax) / 2
-
-                if ymin - adjust_pixels/2 >= 0 and ymax + adjust_pixels/2 <= H:
-                    ymin = int(center_y - height/2 - adjust_pixels/2)
-                    ymax = int(center_y + height/2 + adjust_pixels/2)
-                elif height > multiple:
-                    ymin = int(center_y - (height - remainder)/2)
-                    ymax = int(center_y + (height - remainder)/2)
-                else:
-                    if ymax + adjust_pixels <= H:
-                        ymax += adjust_pixels
-                    elif ymin - adjust_pixels >= 0:
-                        ymin -= adjust_pixels
-                    elif height > multiple:
-                        ymax = ymin + height - remainder
-
-            width = xmax - xmin
-            remainder_w = width % multiple
-
-            if remainder_w != 0:
-                adjust_pixels_w = multiple - remainder_w
-                center_x = (xmin + xmax) / 2
-                xmin = int(center_x - (width - remainder_w)/2)
-                xmax = int(center_x + (width - remainder_w)/2)
 
         area = (int(ymin), int(ymax), int(xmin), int(xmax))
         if area not in inpaint_area:

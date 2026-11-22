@@ -22,9 +22,19 @@ def get_readable_path(path):
 
 
 def is_frame_in_sections(frame_no, sections):
+    """判断帧号是否在 AB section 范围内。
+    sections 为元组列表 [(start, end), ...]，半开区间 [start, end)。
+    兼容旧版 range 对象（自动检测类型）。
+    """
     if sections is None or len(sections) <= 0:
         return True
     for section in sections:
-        if frame_no in section:
-            return True
+        if isinstance(section, tuple):
+            start, end = section
+            if start <= frame_no < end:
+                return True
+        else:
+            # 兼容 range 对象
+            if frame_no in section:
+                return True
     return False

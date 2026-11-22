@@ -9,13 +9,15 @@ class SettingInterface(QtWidgets.QVBoxLayout):
         super().__init__()
         self.setContentsMargins(16, 16, 16, 16)
 
+        mode_texts = list(tr['InpaintMode'].values()) if tr.has_section('InpaintMode') else []
         self.inpaint_mode_combo = ComboBoxSettingCard(
             configItem=config.inpaintMode,
             icon=FluentIcon.GLOBE,
             title=tr["SubtitleExtractorGUI"]["InpaintMode"],
             content="",
             parent=parent,
-            texts=[list(tr['InpaintMode'].values())[i] for i, _ in enumerate(config.inpaintMode.validator.options)],
+            texts=[mode_texts[i] if i < len(mode_texts) else str(opt)
+                   for i, opt in enumerate(config.inpaintMode.validator.options)],
         )
         self.inpaint_mode_combo.setToolTip(tr["SubtitleExtractorGUI"]["InpaintModeDesc"])
         self.addWidget(self.inpaint_mode_combo)

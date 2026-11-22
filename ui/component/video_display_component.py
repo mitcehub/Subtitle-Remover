@@ -34,6 +34,9 @@ class VideoDisplayComponent(QWidget):
         self._last_frame = None
         self.fill_mode = False
         
+        # 启用 Backspace 删除选区（Delete 已由 QShortcut 处理）
+        self.installEventFilter(self)
+
         # 创建右键菜单
         self.__init_context_menu()
         
@@ -84,6 +87,7 @@ class VideoDisplayComponent(QWidget):
         self.video_display.mousePressEvent = self.selection_mouse_press
         self.video_display.mouseMoveEvent = self.selection_mouse_move
         self.video_display.mouseReleaseEvent = self.selection_mouse_release
+        self.video_display.mouseDoubleClickEvent = self.selection_mouse_double_click
         self.video_display.setObjectName('videoDisplay')
 
         # 状态叠加标签
@@ -298,10 +302,6 @@ class VideoDisplayComponent(QWidget):
             self.drag_start_pos = (y_ratio, x_ratio)
             self.resize_edge = None
             self.active_track_index = -1
-            return
-        
-        if event.type() == QEvent.Type.MouseButtonDblClick:
-            self.clear_selections()
             return
         
         clicked_idx = -1
@@ -528,8 +528,10 @@ class VideoDisplayComponent(QWidget):
         return self.tracks
 
     def get_ab_sections(self):
-        """从轨道导出AB分区（0-indexed，兼容后端）"""
-        return [range(t["start"] - 1, t["end"]) for t in self.tracks if t.get("enabled", True)]
+        """从轨道导出AB分区（0-indexed，半开区间 [start, end)，兼容后端）"""
+        # 返回元组 (start, end)，start 为 0-indexed，end 为半开区间右端点
+        # 注意：必须是元组而非 range，否则 ab_sections[-1][1] 会取到 range 的第二个元素（值=1）
+        return [(t["start"] - 1, t["end"]) for t in self.tracks if t.get("enabled", True)]
 
     def _update_coord_mapper(self):
         self._coord_mapper.set_video_params(
@@ -628,6 +630,16 @@ class VideoDisplayComponent(QWidget):
             
         # 设置新值
         self.video_slider.setValue(new_value)
+
+    def selection_mouse_double_click(self, event):
+        """双击清空所有选区（绑定在 video_display 子控件上，双击事件发生在 QLabel）"""
+        if not self.enable_mouse_events:
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clear_selections()
+            event.accept()
+            return
+        QtWidgets.QLabel.mouseDoubleClickEvent(self.video_display, event)
 
     def eventFilter(self, obj, event):
         """事件过滤器"""

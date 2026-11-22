@@ -3,6 +3,7 @@
 """
 
 from PyQt6 import QtWidgets, QtCore, QtGui
+from PyQt6.QtCore import QSize
 from PyQt6.QtWidgets import QFileDialog
 from qfluentwidgets import (ScrollArea, ExpandLayout, CardWidget, SubtitleLabel,
                            FluentIcon, NavigationWidget, NavigationItemPosition,
@@ -16,7 +17,17 @@ PROJECT_URL = "https://github.com/mitcehub/video-subtitle-remover"
 
 class AdvancedSettingInterface(ScrollArea):
     """设置页面（基础设置 + STTN + 关于）"""
-    
+
+    def sizeHint(self):
+        # 重写 sizeHint：返回固定尺寸，不随卡片数量增长，
+        # 避免新增卡片后撑高 QStackedWidget 的默认高度影响主窗口
+        return QSize(800, 600)
+
+    def minimumSizeHint(self):
+        # 重写 minimumSizeHint：返回 0，让 layout 不基于内容 widget 高度
+        # 给 ScrollArea 分配最小空间，内容靠滚动条查看
+        return QSize(0, 0)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._parent_widget = parent
@@ -46,10 +57,20 @@ class AdvancedSettingInterface(ScrollArea):
         self.basic_group.addSettingCard(self.save_directory)
         self.expandLayout.addWidget(self.basic_group)
 
+        self.sttn_group.addSettingCard(self.sttn_max_load_num)
         self.sttn_group.addSettingCard(self.sttn_neighbor_stride)
         self.sttn_group.addSettingCard(self.sttn_reference_length)
-        self.sttn_group.addSettingCard(self.sttn_max_load_num)
         self.expandLayout.addWidget(self.sttn_group)
+
+        self.e2fgvi_group.addSettingCard(self.e2fgvi_max_frames)
+        self.e2fgvi_group.addSettingCard(self.e2fgvi_neighbor_stride)
+        self.e2fgvi_group.addSettingCard(self.e2fgvi_reference_length)
+        self.expandLayout.addWidget(self.e2fgvi_group)
+
+        self.propainter_group.addSettingCard(self.propainter_local_frames)
+        self.propainter_group.addSettingCard(self.propainter_reference_frames)
+        self.propainter_group.addSettingCard(self.propainter_stride)
+        self.expandLayout.addWidget(self.propainter_group)
 
         self.about_group.addSettingCard(self.feedback)
         self.about_group.addSettingCard(self.copyright)
@@ -65,8 +86,52 @@ class AdvancedSettingInterface(ScrollArea):
         self.basic_group = SettingCardGroup(tr["Setting"]["AdvancedSetting"], self.scrollWidget)
         # STTN设置组
         self.sttn_group = SettingCardGroup(tr["Setting"]["SttnSetting"], self.scrollWidget)
+        # E2FGVI 参数组
+        self.e2fgvi_group = SettingCardGroup(tr["Setting"]["E2FGVISetting"], self.scrollWidget)
+        # ProPainter 参数组
+        self.propainter_group = SettingCardGroup(tr["Setting"]["ProPainterSetting"], self.scrollWidget)
         # 关于设置组
         self.about_group = SettingCardGroup(tr["Setting"]["AboutSetting"], self.scrollWidget)
+
+        # E2FGVI 运行参数
+        self.e2fgvi_max_frames = RangeSettingCard(
+            configItem=config.e2fgviMaxFrames,
+            icon=FluentIcon.DICTIONARY,
+            title=tr["Setting"]["E2FGVIMaxFrames"],
+            content=tr["Setting"]["E2FGVIMaxFramesDesc"],
+            parent=self.e2fgvi_group)
+        self.e2fgvi_neighbor_stride = RangeSettingCard(
+            configItem=config.e2fgviNeighborStride,
+            icon=FluentIcon.UNIT,
+            title=tr["Setting"]["E2FGVINeighborStride"],
+            content=tr["Setting"]["E2FGVINeighborStrideDesc"],
+            parent=self.e2fgvi_group)
+        self.e2fgvi_reference_length = RangeSettingCard(
+            configItem=config.e2fgviReferenceLength,
+            icon=FluentIcon.MORE,
+            title=tr["Setting"]["E2FGVIReferenceLength"],
+            content=tr["Setting"]["E2FGVIReferenceLengthDesc"],
+            parent=self.e2fgvi_group)
+
+        # ProPainter 运行参数
+        self.propainter_local_frames = RangeSettingCard(
+            configItem=config.propainterLocalFrames,
+            icon=FluentIcon.DICTIONARY,
+            title=tr["Setting"]["ProPainterLocalFrames"],
+            content=tr["Setting"]["ProPainterLocalFramesDesc"],
+            parent=self.propainter_group)
+        self.propainter_reference_frames = RangeSettingCard(
+            configItem=config.propainterReferenceFrames,
+            icon=FluentIcon.UNIT,
+            title=tr["Setting"]["ProPainterReferenceFrames"],
+            content=tr["Setting"]["ProPainterReferenceFramesDesc"],
+            parent=self.propainter_group)
+        self.propainter_stride = RangeSettingCard(
+            configItem=config.propainterStride,
+            icon=FluentIcon.MORE,
+            title=tr["Setting"]["ProPainterStride"],
+            content=tr["Setting"]["ProPainterStrideDesc"],
+            parent=self.propainter_group)
 
         # 语言选择
         self.interface_language = ComboBoxSettingCard(
@@ -88,7 +153,15 @@ class AdvancedSettingInterface(ScrollArea):
         )
         self.save_directory.clicked.connect(self.choose_save_directory)
 
-        # STTN设置组
+        # STTN设置组（顺序：最大帧数 → 步长 → 参考帧数）
+        self.sttn_max_load_num = RangeSettingCard(
+            configItem=config.sttnMaxLoadNum,
+            icon=FluentIcon.DICTIONARY,
+            title=tr["Setting"]["SttnMaxLoadNum"],
+            content=tr["Setting"]["SttnMaxLoadNumDesc"],
+            parent=self.sttn_group
+        )
+
         self.sttn_neighbor_stride = RangeSettingCard(
             configItem=config.sttnNeighborStride,
             icon=FluentIcon.UNIT,
@@ -102,14 +175,6 @@ class AdvancedSettingInterface(ScrollArea):
             icon=FluentIcon.MORE,
             title=tr["Setting"]["SttnReferenceLength"],
             content=tr["Setting"]["SttnReferenceLengthDesc"],
-            parent=self.sttn_group
-        )
-
-        self.sttn_max_load_num = RangeSettingCard(
-            configItem=config.sttnMaxLoadNum,
-            icon=FluentIcon.DICTIONARY,
-            title=tr["Setting"]["SttnMaxLoadNum"],
-            content=tr["Setting"]["SttnMaxLoadNumDesc"],
             parent=self.sttn_group
         )
 
@@ -159,7 +224,8 @@ class AdvancedSettingInterface(ScrollArea):
         folder = QFileDialog.getExistingDirectory(
             self, tr['Setting']['ChooseDirectory'], last_save_directory)
         if not folder:
-            folder = ""
+            # 取消选择时保持原值，不应清空已配置的保存目录
+            return
 
         config.set(config.saveDirectory, folder)
         self.save_directory.setContent(tr["Setting"]["SaveDirectoryDefault"] if not config.saveDirectory.value else config.saveDirectory.value)

@@ -2,9 +2,19 @@
     "Main": {
         "CheckUpdateOnStartup": true,
         "HardwareAcceleration": true,
-        "InpaintMode": "sttn-auto",
+        "InpaintMode": "e2fgvi",
         "SaveDirectory": "",
         "SubtitleSelectionAreas": "0.88,0.99,0.15,0.85"
+    },
+    "Models": {
+        "E2FGVICheckpoint": "E:\\AI Tool\\video subtitle remover\\core\\inpaint\\models\\e2fgvi\\gen_400000.pth",
+        "ProPainterCheckpoint": "E:\\AI Tool\\video subtitle remover\\core\\inpaint\\models\\propainter\\gen_310020.pt",
+        "STTNCheckpoint": "E:\\AI Tool\\video subtitle remover\\core\\inpaint\\models\\sttn\\sttn.pt"
+    },
+    "E2FGVI": {
+        "MaxFrames": 150,
+        "NeighborStride": 5,
+        "ReferenceLength": 10
     },
     "QFluentWidgets": {
         "FontFamilies": [
@@ -17,10 +27,15 @@
     },
     "Window": {
         "Interface": "ch",
-        "Height": 900,
-        "Width": 1400,
-        "X": 281,
-        "Y": 69
+        "Height": 810,
+        "Width": 1246,
+        "X": 374,
+        "Y": 134
+    },
+    "ProPainter": {
+        "LocalFrames": 10,
+        "ReferenceFrames": 10,
+        "Stride": 5
     },
     "Sttn": {
         "MaxLoadNum": 50,

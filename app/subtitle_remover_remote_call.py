@@ -3,6 +3,7 @@
 import multiprocessing
 import threading
 import logging
+import pickle
 import cv2
 from enum import Enum
 
@@ -25,7 +26,8 @@ class SubtitleRemoverRemoteCall:
         self.queue = multiprocessing.Queue()
         self.callbacks = {}
         self.running = True
-        threading.Thread(target=self.run, daemon=True).start()
+        self._thread = threading.Thread(target=self.run, daemon=True)
+        self._thread.start()
 
     def run(self):
         try:
@@ -50,7 +52,15 @@ class SubtitleRemoverRemoteCall:
 
     def stop(self):
         self.running = False
-        self.queue.put((Command.FINISH, (None,)))
+        try:
+            # FINISH 排在已缓冲消息之后，读取线程会先派发剩余日志/进度再退出
+            self.queue.put((Command.FINISH, (None,)))
+        except Exception:
+            pass
+        if self._thread.is_alive():
+            self._thread.join(timeout=3)
+            if self._thread.is_alive():
+                logger.warning('remote_call_thread_still_alive_after_stop')
 
     def register_update_progress_callback(self, callback):
         self.callbacks[Command.PROGRESS] = callback
@@ -78,6 +88,12 @@ class SubtitleRemoverRemoteCall:
 
     @staticmethod
     def remote_call_catch_error(queue, e):
+        # multiprocessing.Queue 的序列化发生在 feeder 线程，queue.put() 捕获不到 pickle 失败；
+        # 先 pickle.dumps 预校验，失败则退化为字符串，避免错误通知被静默丢弃。
+        try:
+            pickle.dumps(e)
+        except Exception:
+            e = f'{type(e).__name__}: {e}'
         queue.put((Command.ERROR, (e,)))
 
     @staticmethod
@@ -92,13 +108,19 @@ class SubtitleRemoverRemoteCall:
         return cv2.resize(frame, (max_width, new_h), interpolation=cv2.INTER_AREA)
 
     @staticmethod
+    def _downscale_arg(arg):
+        """递归降采样：识别 list/tuple 内的帧并逐帧缩放，保持 list 契约。"""
+        if isinstance(arg, cv2.UMat):
+            arg = arg.get()
+        if isinstance(arg, (list, tuple)):
+            return [SubtitleRemoverRemoteCall._downscale_arg(x) for x in arg]
+        if hasattr(arg, 'shape'):
+            return SubtitleRemoverRemoteCall._downscale_for_preview(arg)
+        return arg
+
+    @staticmethod
     def remote_call_update_preview_with_comp(queue, *args):
-        downscaled_args = []
-        for arg in args:
-            if isinstance(arg, cv2.UMat):
-                arg = arg.get()
-            if hasattr(arg, 'shape'):
-                downscaled_args.append(SubtitleRemoverRemoteCall._downscale_for_preview(arg))
-            else:
-                downscaled_args.append(arg)
+        # pipeline 以 queue, [ori, comp] 传单个 list 参数；这里识别 list/tuple 并逐帧降采样，
+        # 否则 list 没有 shape，_downscale_for_preview 永不执行，4K 原图会按原始大小 pickle 传输。
+        downscaled_args = [SubtitleRemoverRemoteCall._downscale_arg(arg) for arg in args]
         queue.put((Command.UPDATE_PREVIEW_WITH_COMP, (*downscaled_args,)))

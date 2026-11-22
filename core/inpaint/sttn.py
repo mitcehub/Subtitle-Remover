@@ -5,6 +5,7 @@ import math
 import time
 import gc
 import logging
+import contextlib
 from typing import List
 
 import cv2
@@ -16,9 +17,9 @@ from tqdm import tqdm
 
 from infra.config import config
 from infra.utils import is_frame_in_sections
-from core.inpaint.mask import get_inpaint_area_by_mask, get_tight_inpaint_area, create_mask
+from core.inpaint.region import get_inpaint_area_by_mask, get_tight_inpaint_area
+from core.video_io.ffmpeg import FFmpegCLI
 from core.video_io.video_reader import FramePrefetcher, create_video_capture
-from infra.hardware import HardwareAccelerator
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,12 @@ SPLIT_H_NUMERATOR = 3
 SPLIT_H_DENOMINATOR = 16
 # GC 间隔：每 N 个 chunk 执行一次 gc.collect + empty_cache
 GC_INTERVAL = 10
+# prior 后处理（对齐训练仓库 infer_subtitle.py 2026-08-23 定稿生产值）：
+# PRIOR_DILATE：连续概率场 max-pool 膨胀核（5≈全分辨率 ~2px），抬升字母空隙/
+# 汉字空腔/笔画边缘的低概率区，消除软融合残留（漏字）；1=关闭。
+# PRIOR_THRESHOLD：历史二值化阈值。软融合下不参与出像素，仅作语义保留与日志。
+PRIOR_THRESHOLD = 0.30
+PRIOR_DILATE = 5
 
 
 # ============================================================================
@@ -54,7 +61,14 @@ class Attention(nn.Module):
         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(query.size(-1))
         if m is not None:
             scores.masked_fill(m, torch.finfo(scores.dtype).min)
-        p_attn = F.softmax(scores, dim=-1)
+        # 对齐训练仓库：softmax 禁用 autocast 自动 FP32 promote，保持输入精度
+        # （BF16 显存优化口径）；非 cuda/cpu 后端用 nullcontext 兜底
+        if scores.device.type in ('cuda', 'cpu'):
+            ac_off = torch.autocast(device_type=scores.device.type, enabled=False)
+        else:
+            ac_off = contextlib.nullcontext()
+        with ac_off:
+            p_attn = F.softmax(scores, dim=-1)
         return torch.matmul(p_attn, value), p_attn
 
 
@@ -135,29 +149,58 @@ class Deconv(nn.Module):
 
 
 class TextPriorHead(nn.Module):
-    def __init__(self, in_dim=256, hidden_dim=64):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_dim + 3, hidden_dim, 3, 1, 1)
-        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
-        self.conv3 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
-        self.deconv1 = Deconv(hidden_dim, hidden_dim // 2, padding=1)
-        self.deconv2 = Deconv(hidden_dim // 2, 1, padding=1)
+    """v4 STTN prior head（2026-08-27，与训练仓库 sttn_subtitle.py 对齐）：
+    - 输入 H/2 encoder 64ch 特征 + RGB 下采样 + 可选 ±k 时域统计 2ch
+    - 4 层 conv(96ch)+BN+LeakyReLU(0.2)，可选上下文膨胀卷积
+    - 单级 deconv 2x 上采样回全分辨率
+    """
 
-    def forward(self, x, rgb=None):
+    def __init__(self, in_dim=64, hidden_dim=96, temporal=True,
+                 context_dilation=True):
+        super().__init__()
+        self.temporal = temporal
+        self.context_dilation = context_dilation
+        extra = 2 if temporal else 0
+        self.conv1 = nn.Conv2d(in_dim + 3 + extra, hidden_dim, 3, 1, 1)
+        self.bn1 = nn.BatchNorm2d(hidden_dim)
+        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
+        self.bn2 = nn.BatchNorm2d(hidden_dim)
+        self.conv3 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
+        self.bn3 = nn.BatchNorm2d(hidden_dim)
+        self.conv4 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1)
+        self.bn4 = nn.BatchNorm2d(hidden_dim)
+        if context_dilation:
+            self.ctx_conv1 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 2, dilation=2)
+            self.ctx_bn1 = nn.BatchNorm2d(hidden_dim)
+            self.ctx_conv2 = nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 4, dilation=4)
+            self.ctx_bn2 = nn.BatchNorm2d(hidden_dim)
+        self.deconv1 = Deconv(hidden_dim, 1, padding=1)
+
+    def forward(self, x, rgb=None, temporal=None):
         if rgb is not None:
             rgb = F.interpolate(rgb, size=x.shape[-2:], mode='bilinear', align_corners=False)
             x = torch.cat([x, rgb], dim=1)
-        x = F.leaky_relu(self.conv1(x), 0.2)
-        x = F.leaky_relu(self.conv2(x), 0.2)
-        x = F.leaky_relu(self.conv3(x), 0.2)
-        return self.deconv2(self.deconv1(x))
+        if temporal is not None:
+            temporal = F.interpolate(temporal, size=x.shape[-2:],
+                                     mode='bilinear', align_corners=False)
+            x = torch.cat([x, temporal], dim=1)
+        x = F.leaky_relu(self.bn1(self.conv1(x)), 0.2)
+        x = F.leaky_relu(self.bn2(self.conv2(x)), 0.2)
+        x = F.leaky_relu(self.bn3(self.conv3(x)), 0.2)
+        x = F.leaky_relu(self.bn4(self.conv4(x)), 0.2)
+        if self.context_dilation:
+            x = F.leaky_relu(self.ctx_bn1(self.ctx_conv1(x)), 0.2)
+            x = F.leaky_relu(self.ctx_bn2(self.ctx_conv2(x)), 0.2)
+        return self.deconv1(x)
 
 
 class SubtitleRemovalGenerator(nn.Module):
-    def __init__(self):
+    def __init__(self, prior_temporal=True, context_dilation=True):
         super().__init__()
         channel = 256
         patch_size = [(80, 15), (32, 6), (10, 5), (5, 3)]
+        self.prior_temporal = prior_temporal
+        self.prior_context = context_dilation
         self.transformer = nn.Sequential(*[TransformerBlock(patch_size, hidden=channel) for _ in range(8)])
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 64, 3, 2, 1), nn.LeakyReLU(0.2, True),
@@ -171,8 +214,46 @@ class SubtitleRemovalGenerator(nn.Module):
             Deconv(64, 64, 3, 1), nn.LeakyReLU(0.2, True),
             nn.Conv2d(64, 3, 3, 1, 1)
         )
-        self.prior_head = TextPriorHead(in_dim=channel, hidden_dim=64)
+        self.prior_head = TextPriorHead(
+            in_dim=64, hidden_dim=96, temporal=prior_temporal,
+            context_dilation=context_dilation)
+        # 与训练仓库一致：-1 表示按当前时域窗口取半窗（legacy）；新 checkpoint
+        # 会携带自己的 _temporal_radius。
+        self.register_buffer('_temporal_radius', torch.tensor(-1))
         self.apply(_init_weights)
+
+    def compute_temporal_maps(self, frames_t):
+        """时域稳定性图：ch0=±k 帧灰度 std，ch1=|时域中值-当前帧|。"""
+        b, t, c, h, w = frames_t.shape
+        radius = int(self._temporal_radius.item())
+        k = max((t - 1) // 2, 0) if radius < 0 else min(radius, max(t - 1, 0))
+        if k == 0:
+            return frames_t.new_zeros(b * t, 2, h, w)
+        x = frames_t.mean(dim=2, keepdim=True).transpose(1, 2)
+        win = F.pad(x, (0, 0, 0, 0, k, k), mode='replicate').unfold(2, 2 * k + 1, 1)
+        maps = torch.cat([
+            torch.tanh(win.std(dim=-1) * 5),
+            torch.tanh((win.median(dim=-1).values - x).abs() * 5),
+        ], dim=1)
+        return maps.permute(0, 2, 1, 3, 4).contiguous().reshape(b * t, 2, h, w)
+
+    def encode(self, frames_flat):
+        """手动逐层执行 encoder（键名保持 encoder.0~7 不变）。
+
+        Returns:
+            (low_feat, enc_feat)：low_feat 为 H/2 64ch 特征（prior_head 输入），
+            enc_feat 为 H/4 256ch 特征（transformer 输入，与原版一致）。
+        """
+        h = self.encoder[0](frames_flat)
+        h = self.encoder[1](h)
+        h = self.encoder[2](h)
+        h = self.encoder[3](h)
+        low_feat = h
+        h = self.encoder[4](h)
+        h = self.encoder[5](h)
+        h = self.encoder[6](h)
+        enc_feat = self.encoder[7](h)
+        return low_feat, enc_feat
 
 
 # ============================================================================
@@ -182,7 +263,8 @@ class SubtitleRemovalGenerator(nn.Module):
 class STTNInpaint:
     def __init__(self, device, model_path):
         self.device = device
-        self.model = SubtitleRemovalGenerator().to(device)
+        self.model = SubtitleRemovalGenerator(
+            prior_temporal=True, context_dilation=True).to(device)
 
         # 记录模型文件的路径、大小和 SHA-256 前缀（前后各 1MB，避免完整读取 67MB）
         import hashlib
@@ -201,87 +283,45 @@ class STTNInpaint:
 
         ckpt = torch.load(model_path, map_location='cpu', weights_only=True)
         state_dict = ckpt.get('netG', ckpt)
-        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
-        if missing or unexpected:
-            logger.error('sttn_model_weight_mismatch: missing=%d, unexpected=%d',
-                         len(missing), len(unexpected))
-            for k in missing:
-                logger.error('  missing: %s', k)
-            for k in unexpected:
-                logger.error('  unexpected: %s', k)
+        try:
+            self.model.load_state_dict(state_dict, strict=True)
+        except RuntimeError as exc:
+            logger.error('sttn_model_weight_mismatch: %s', exc)
             raise RuntimeError(
-                f'STTN 模型权重不匹配：缺少 {len(missing)} 个参数、多出 {len(unexpected)} 个参数。'
-                '请确认 core/inpaint/models/sttn/sttn.pt 是正确版本。'
-            )
+                'STTN 模型权重与当前 v4 架构不匹配；请使用训练仓库 '
+                'gen_300000/gen_278000（含 temporal + context prior head）权重。'
+            ) from exc
         self.model.eval()
+        # CUDA 上启用 bfloat16 autocast（对齐训练仓库推理口径，transformer 提速）；
+        # 其他后端（CPU/MPS/DirectML）保持 fp32
+        self._use_bf16 = False
+        if self.device.type == 'cuda':
+            try:
+                self._use_bf16 = torch.cuda.is_bf16_supported()
+            except Exception:
+                self._use_bf16 = False
         self.neighbor_stride = config.sttnNeighborStride.value
         self.ref_length = config.sttnReferenceLength.value
-        logger.info('sttn_model_loaded: device=%s, neighbor_stride=%d, ref_length=%d',
-                 device, self.neighbor_stride, self.ref_length)
-
-    def __call__(self, input_frames: List[np.ndarray], input_mask: np.ndarray,
-                 tight_areas: List[tuple] | None = None):
-        """执行 STTN 推理。
-
-        Args:
-            input_frames: 原始帧列表 (BGR)
-            input_mask: 二值遮罩
-            tight_areas: 可选紧凑裁剪区域列表 [(ymin, ymax, xmin, xmax)]。
-                         提供时使用 tight crop 替代全宽 crop。
-        """
-        _, mask = cv2.threshold(input_mask, 127, 1, cv2.THRESH_BINARY)
-        mask = mask[:, :, None]
-        H, W = mask.shape[:2]
-
-        if tight_areas:
-            inpaint_area = tight_areas
-            use_tight = True
-            logger.info('sttn_inpaint: using tight crop, %d areas', len(tight_areas))
-        else:
-            split_h = int(W * SPLIT_H_NUMERATOR / SPLIT_H_DENOMINATOR)
-            inpaint_area = get_inpaint_area_by_mask(W, H, split_h, mask)
-            use_tight = False
-
-        frames_hr = [f.copy() for f in input_frames]
-        frames_scaled = {}
-        comps = {}
-
-        for j, image in enumerate(frames_hr):
-            for k, area in enumerate(inpaint_area):
-                if use_tight:
-                    crop = image[area[0]:area[1], area[2]:area[3], :]
-                else:
-                    crop = image[area[0]:area[1], :, :]
-                frames_scaled.setdefault(k, []).append(cv2.resize(crop, (MODEL_W, MODEL_H)))
-
-        for k in frames_scaled:
-            comps[k] = self._inpaint(frames_scaled[k])
-
-        if not inpaint_area:
-            return frames_hr
-
-        result = []
-        for j, frame in enumerate(frames_hr):
-            for k, area in enumerate(inpaint_area):
-                area_h = area[1] - area[0]
-                if use_tight:
-                    area_w = area[3] - area[2]
-                    comp = cv2.resize(comps[k][j], (area_w, area_h))
-                    comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                    m = mask[area[0]:area[1], area[2]:area[3], :]
-                    frame[area[0]:area[1], area[2]:area[3], :] = m * comp + (1 - m) * frame[area[0]:area[1], area[2]:area[3], :]
-                else:
-                    comp = cv2.resize(comps[k][j], (W, area_h))
-                    comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                    m = mask[area[0]:area[1], :]
-                    frame[area[0]:area[1], :, :] = m * comp + (1 - m) * frame[area[0]:area[1], :, :]
-            result.append(frame)
-        return result
+        logger.info('sttn_model_loaded: device=%s, neighbor_stride=%d, ref_length=%d, '
+                    'prior_threshold=%.2f(reserved), prior_dilate=%d, bf16=%s',
+                    device, self.neighbor_stride, self.ref_length,
+                    PRIOR_THRESHOLD, PRIOR_DILATE, self._use_bf16)
 
     def _get_ref_index(self, neighbor_ids, length):
         return [i for i in range(0, length, self.ref_length) if i not in neighbor_ids]
 
     def _inpaint(self, frames: List[np.ndarray]):
+        """执行 STTN 推理。
+
+        Args:
+            frames: 缩放后的帧列表 (BGR, MODEL_W×MODEL_H)
+        Returns:
+            (comp_outputs, prior_probs):
+                comp_outputs 为模型分辨率软融合结果（decoder 输出与连续 prior
+                概率加权后再做滑窗重叠平均，float32 [0,1]），
+                prior_probs 为膨胀后的连续 prior 概率场（float32 [0,1]，每帧一张）。
+                调用方在原始分辨率用连续概率完成二次软融合，避免非文字区重采样模糊。
+        """
         frame_length = len(frames)
         rgb_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0 for f in frames]
         chunk_t = torch.from_numpy(np.stack(rgb_frames)).float().permute(0, 3, 1, 2).unsqueeze(0).to(self.device) * 2 - 1
@@ -289,13 +329,29 @@ class STTNInpaint:
         comp_frames = [None] * frame_length
         weights = [0] * frame_length
 
+        # bf16 autocast 仅在 CUDA 且硬件支持时启用，其余后端为 no-op
+        autocast_ctx = (torch.autocast('cuda', dtype=torch.bfloat16)
+                        if self._use_bf16 else contextlib.nullcontext())
+
         with torch.no_grad():
             frames_flat = chunk_t.view(-1, 3, MODEL_H, MODEL_W)
 
-            # 新模型：单次编码（不再 masking input 后二次编码）
-            enc_feat = self.model.encoder(frames_flat)
-            prior_logits = self.model.prior_head(enc_feat, rgb=frames_flat)
-            _, c_feat, h_feat, w_feat = enc_feat.shape
+            # v4：先算 ±k 时域稳定性图（与训练 forward 同源），再走 prior_head
+            with autocast_ctx:
+                low_feat, enc_feat = self.model.encode(frames_flat)
+                temporal_maps = None
+                if getattr(self.model, 'prior_temporal', False):
+                    temporal_maps = self.model.compute_temporal_maps(chunk_t)
+                prior_logits = self.model.prior_head(
+                    low_feat, rgb=frames_flat, temporal=temporal_maps)
+
+            prior_prob = torch.sigmoid(prior_logits).float()
+            # 概率场膨胀：max-pool 抬升空洞/边缘低概率区（字母内部空隙、汉字空腔、
+            # 笔画边缘一圈），缓解软融合"检测到了但保留原图"的漏字
+            if PRIOR_DILATE > 1:
+                prior_prob = F.max_pool2d(prior_prob, PRIOR_DILATE, stride=1,
+                                          padding=PRIOR_DILATE // 2)
+            prior_np = prior_prob[:, 0].cpu().numpy()
 
             for f in range(0, frame_length, self.neighbor_stride):
                 neighbor_ids = list(range(max(0, f - self.neighbor_stride), min(frame_length, f + self.neighbor_stride + 1)))
@@ -303,17 +359,19 @@ class STTNInpaint:
                 all_ids = neighbor_ids + self._get_ref_index(neighbor_ids, frame_length)
 
                 feat_win = enc_feat[all_ids]
-                # 新模型：transformer 无 attention mask
-                feat_win = self.model.transformer({'x': feat_win, 'b': 1, 'c': c_feat})['x']
-                output = torch.tanh(self.model.decoder(feat_win))
+                # transformer 无 attention mask（新模型全程看完整原图）
+                with autocast_ctx:
+                    feat_win = self.model.transformer({'x': feat_win, 'b': 1, 'c': enc_feat.shape[1]})['x']
+                    output = torch.tanh(self.model.decoder(feat_win)).float()
 
-                prior_np = torch.sigmoid(prior_logits[all_ids])[:, 0].cpu().numpy()
                 for i in range(l_t):
                     idx = neighbor_ids[i]
-                    np_out = output[i].cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5
-                    np_prior = (prior_np[i] > 0.7).astype(np.float32)[..., None]
-                    blended = np_prior * np_out + (1 - np_prior) * rgb_frames[idx]
-                    blended = blended.clip(0, 1).astype(np.float32)
+                    out = (output[i].cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5).astype(np.float32)
+                    # 模型分辨率软融合：连续 prior 概率加权（与训练 blend 对齐），
+                    # 避免硬切侵蚀细笔画边缘；融合后再参与滑窗重叠平均
+                    p = prior_np[idx][..., None]
+                    blended = (p * out + (1 - p) * rgb_frames[idx]).clip(0, 1).astype(np.float32)
+
                     if comp_frames[idx] is None:
                         comp_frames[idx] = blended
                         weights[idx] = 1
@@ -321,11 +379,12 @@ class STTNInpaint:
                         comp_frames[idx] += blended
                         weights[idx] += 1
 
-        return [
-            (comp_frames[i] / weights[i] * 255).astype(np.uint8) if comp_frames[i] is not None
-            else cv2.cvtColor(frames[i], cv2.COLOR_BGR2RGB)
+        comp_outputs = [
+            (comp_frames[i] / weights[i]).clip(0, 1).astype(np.float32) if comp_frames[i] is not None
+            else rgb_frames[i]
             for i in range(frame_length)
         ]
+        return comp_outputs, prior_np
 
 
 class STTNAutoInpaint:
@@ -344,6 +403,30 @@ class STTNAutoInpaint:
                         raw_max_load, self.clip_gap,
                         config.sttnNeighborStride.value, config.sttnReferenceLength.value, min_chunk)
 
+    def _build_chunk_ranges(self, frame_info, effective_gap, input_sub_remover=None):
+        """生成 chunk 帧范围列表 [(start, end), ...]。
+
+        按 effective_gap 等分。AB section 限制：
+        只在 AB section 覆盖的帧区间内生成 chunk，
+        超出范围的帧在主循环中被 skip 跳过（非 chunk 边界）。
+        """
+        total_len = frame_info['len']
+
+        # 确定 AB section 范围
+        ab_start, ab_end = 0, total_len
+        if input_sub_remover is not None and input_sub_remover.ab_sections:
+            ab_sections = input_sub_remover.ab_sections
+            ab_start = max(0, ab_sections[0][0])
+            ab_end = min(total_len, ab_sections[-1][1])
+        proc_len = ab_end - ab_start
+        if proc_len <= 0:
+            return []
+
+        total_chunks = (proc_len + effective_gap - 1) // effective_gap
+        return [(ab_start + i * effective_gap,
+                 min(ab_start + (i + 1) * effective_gap, ab_end))
+                for i in range(total_chunks)]
+
     def __call__(self, input_mask=None, input_sub_remover=None, tbar=None, gui_mode=False):
         reader = None
         writer = None
@@ -358,14 +441,18 @@ class STTNAutoInpaint:
                 'fps': reader.get(cv2.CAP_PROP_FPS),
                 'len': int(reader.get(cv2.CAP_PROP_FRAME_COUNT) + 0.5)
             }
+            if frame_info['len'] <= 0:
+                fallback_len = FFmpegCLI.instance().get_frame_count(self.video_path) or 0
+                if fallback_len > 0:
+                    frame_info['len'] = fallback_len
+                    logger.info('sttn_frame_count_fallback: %d', fallback_len)
 
             if input_sub_remover is not None:
                 ab_sections = input_sub_remover.ab_sections
                 track_data = getattr(input_sub_remover, 'track_data', None)
-                sub_areas = getattr(input_sub_remover, 'sub_areas', None)
                 writer = input_sub_remover.video_writer
             else:
-                ab_sections = track_data = sub_areas = None
+                ab_sections = track_data = None
                 writer = cv2.VideoWriter(self.video_out_path, cv2.VideoWriter_fourcc(*"mp4v"),
                                          frame_info['fps'], (frame_info['W'], frame_info['H']))
 
@@ -384,24 +471,46 @@ class STTNAutoInpaint:
             logger.info('sttn_auto: using full-width crop from mask, %d areas', len(global_area))
 
             effective_gap = self.clip_gap
-            vram = HardwareAccelerator.instance().get_available_vram_mb()
-            if vram > 0 and frame_info['W'] > 0 and frame_info['H'] > 0:
-                max_frames = max(int(vram * 1024 * 1024 / (frame_info['W'] * frame_info['H'] * 12)), 10)
-                capped = min(effective_gap, max_frames)
-                if capped < effective_gap:
-                    logger.info('sttn_max_load_num: user=%d capped by vram=%dMB (%dx%d frame)',
-                                effective_gap, vram, frame_info['W'], frame_info['H'])
-                    effective_gap = capped
-
-            total_chunks = (frame_info['len'] + effective_gap - 1) // effective_gap
+            # 生成 chunk 列表 [(start, end), ...]
+            chunk_ranges = self._build_chunk_ranges(frame_info, effective_gap,
+                                                     input_sub_remover)
             total_written = 0
+            logger.info('chunk_plan: total_chunks=%d, total_frames=%d',
+                        len(chunk_ranges), frame_info['len'])
 
-            for i in range(total_chunks):
-                start_f = i * effective_gap
-                end_f = min((i + 1) * effective_gap, frame_info['len'])
+            cursor = 0  # prefetcher 下一个将读出的绝对帧号
+            end_of_stream = False
+
+            def write_original_until(target_frame):
+                """顺序读取并原样写出 [cursor, target_frame) 的帧。
+
+                读取器只能顺序解码，必须显式消费掉 AB 段之前的帧，
+                否则 chunk 的绝对帧号会与实际图像错位。
+                """
+                nonlocal cursor, total_written
+                while cursor < target_frame:
+                    ok, image = prefetcher.read()
+                    if not ok:
+                        return False
+                    writer.write(image)
+                    total_written += 1
+                    cursor += 1
+                    if input_sub_remover is not None:
+                        if tbar:
+                            input_sub_remover.update_progress(tbar, 1)
+                        if gui_mode:
+                            input_sub_remover._emit_preview(image, image)
+                    elif tbar is not None:
+                        tbar.update(1)
+                return True
+
+            for chunk_idx, (start_f, end_f) in enumerate(chunk_ranges):
                 tqdm.write(f'Processing: {start_f + 1} - {end_f} / Total: {frame_info["len"]}')
 
-                chunk_mask = global_mask
+                if not write_original_until(start_f):
+                    end_of_stream = True
+                    break
+
                 chunk_area = global_area
                 chunk_tight = False
                 if track_data:
@@ -415,13 +524,13 @@ class STTNAutoInpaint:
 
                 frames_hr, frames, comps = [], {}, {k: [] for k in range(len(chunk_area))}
                 valid_count = 0
-                read_failed = False
 
                 for j in range(start_f, end_f):
                     ok, image = prefetcher.read()
                     if not ok:
-                        read_failed = True
+                        end_of_stream = True
                         break
+                    cursor += 1
                     frames_hr.append(image)
                     valid_count += 1
                     if is_frame_in_sections(j, ab_sections):
@@ -433,7 +542,7 @@ class STTNAutoInpaint:
                                 frames.setdefault(k, []).append(cv2.resize(image[a[0]:a[1], :], (MODEL_W, MODEL_H)))
 
                 if valid_count == 0:
-                    if read_failed:
+                    if end_of_stream:
                         break
                     continue
 
@@ -452,43 +561,42 @@ class STTNAutoInpaint:
                         original = frames_hr[j].copy() if gui_mode else None
                         frame = frames_hr[j]
 
-                        # P3: 按帧计算有效轨道 mask，避免 chunk 边界帧被多余处理
+                        # 按帧判断是否在 track 时间范围内，避免 chunk 边界帧被多余处理
                         do_composite = j in processed_map
-                        per_frame_mask = None
                         if do_composite and track_data:
                             frame_number = start_f + j
                             frame_tracks = [t for t in track_data if t.get("enabled", True)
                                             and t["start"] <= frame_number + 1 <= t["end"]]
-                            if frame_tracks:
-                                frame_areas = [(t["ymin"], t["ymax"], t["xmin"], t["xmax"])
-                                               for t in frame_tracks]
-                                _fm = create_mask((frame_info['H'], frame_info['W']), frame_areas)
-                                _, _fm = cv2.threshold(_fm, 127, 1, cv2.THRESH_BINARY)
-                                per_frame_mask = _fm[:, :, None]
-                            else:
+                            if not frame_tracks:
                                 do_composite = False  # 无轨道覆盖该帧 → 不合成
 
                         if do_composite:
                             ci = processed_map[j]
                             for k in range(len(chunk_area)):
-                                if ci < len(comps[k]):
+                                if comps[k] and ci < len(comps[k][0]):
                                     a = chunk_area[k]
                                     area_h = a[1] - a[0]
+                                    comp_preds, prior_probs = comps[k]
+                                    # 高分辨率二次软融合：模型分辨率融合结果上采样后，
+                                    # 与连续 prior 概率（上采样，不二值化）加权，
+                                    # 文字区取修复结果，非文字区保留原始高清像素
                                     if chunk_tight:
                                         area_w = a[3] - a[2]
-                                        comp = cv2.resize(comps[k][ci], (area_w, area_h))
-                                        comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                                        m = (per_frame_mask[a[0]:a[1], a[2]:a[3], :]
-                                             if per_frame_mask is not None
-                                             else chunk_mask[a[0]:a[1], a[2]:a[3], :])
-                                        frame[a[0]:a[1], a[2]:a[3], :] = m * comp + (1 - m) * frame[a[0]:a[1], a[2]:a[3], :]
+                                        pred_hr = cv2.resize(comp_preds[ci], (area_w, area_h), interpolation=cv2.INTER_LINEAR)
+                                        prior_hr = cv2.resize(prior_probs[ci], (area_w, area_h), interpolation=cv2.INTER_LINEAR)[..., None]
+                                        orig_hr = cv2.cvtColor(frame[a[0]:a[1], a[2]:a[3], :], cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                                        comp_rgb = (prior_hr * pred_hr + (1 - prior_hr) * orig_hr).clip(0, 1)
+                                        comp = (comp_rgb * 255).astype(np.uint8)
+                                        comp = cv2.cvtColor(comp, cv2.COLOR_RGB2BGR)
+                                        frame[a[0]:a[1], a[2]:a[3], :] = comp
                                     else:
-                                        comp = cv2.resize(comps[k][ci], (frame_info['W'], area_h))
-                                        comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_RGB2BGR)
-                                        m = (per_frame_mask[a[0]:a[1], :]
-                                             if per_frame_mask is not None
-                                             else chunk_mask[a[0]:a[1], :])
-                                        frame[a[0]:a[1], :, :] = m * comp + (1 - m) * frame[a[0]:a[1], :, :]
+                                        pred_hr = cv2.resize(comp_preds[ci], (frame_info['W'], area_h), interpolation=cv2.INTER_LINEAR)
+                                        prior_hr = cv2.resize(prior_probs[ci], (frame_info['W'], area_h), interpolation=cv2.INTER_LINEAR)[..., None]
+                                        orig_hr = cv2.cvtColor(frame[a[0]:a[1], :, :], cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                                        comp_rgb = (prior_hr * pred_hr + (1 - prior_hr) * orig_hr).clip(0, 1)
+                                        comp = (comp_rgb * 255).astype(np.uint8)
+                                        comp = cv2.cvtColor(comp, cv2.COLOR_RGB2BGR)
+                                        frame[a[0]:a[1], :, :] = comp
                         writer.write(frame)
                         total_written += 1
                         if input_sub_remover:
@@ -506,13 +614,29 @@ class STTNAutoInpaint:
                             if gui_mode:
                                 input_sub_remover._emit_preview(frames_hr[j], frames_hr[j])
 
-                if read_failed:
+                if end_of_stream:
                     break
                 del frames_hr, frames, comps
-                if i % GC_INTERVAL == 0:
+                if chunk_idx % GC_INTERVAL == 0:
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+
+            if not end_of_stream:
+                # AB 段之后的帧原样写出；读到 EOF 为止，不依赖可能不准的帧总数
+                while True:
+                    ok, image = prefetcher.read()
+                    if not ok:
+                        break
+                    writer.write(image)
+                    total_written += 1
+                    if input_sub_remover is not None:
+                        if tbar:
+                            input_sub_remover.update_progress(tbar, 1)
+                        if gui_mode:
+                            input_sub_remover._emit_preview(image, image)
+                    elif tbar is not None:
+                        tbar.update(1)
         except Exception as e:
             logger.error('sttn_process_error: %s', e)
             raise

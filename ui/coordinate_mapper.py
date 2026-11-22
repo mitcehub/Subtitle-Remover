@@ -70,8 +70,9 @@ class CoordinateMapper:
         """将鼠标位置转换为归一化坐标 (0~1)"""
         sw, sh = self.scaled_width or 1, self.scaled_height or 1
         bl, bt = self.border_left or 0, self.border_top or 0
-        fx = max(0, min(sw - 1, pos.x() - bl))
-        fy = max(0, min(sh - 1, pos.y() - bt))
+        # 按 sw/sh 归一化，边界夹到 [0, sw]/[0, sh]，避免边缘像素被丢弃
+        fx = max(0.0, min(float(sw), pos.x() - bl))
+        fy = max(0.0, min(float(sh), pos.y() - bt))
         return (fy / sh if sh > 0 else 0, fx / sw if sw > 0 else 0)
 
     def norm_to_rect(self, xmin, ymin, xmax, ymax):
