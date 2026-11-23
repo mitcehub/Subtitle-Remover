@@ -17,7 +17,7 @@ logger = logging.getLogger('cli')
 
 def parse_args():
     """解析命令行参数并校验合法性。"""
-    parser = argparse.ArgumentParser(description='video subtitle remover CLI')
+    parser = argparse.ArgumentParser(description='Subtitle Remover CLI')
     parser.add_argument('input', help='Input video path')
     parser.add_argument('-o', '--output', help='Output file path')
     parser.add_argument('--subtitle-area', type=str, default=None,

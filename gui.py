@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-@desc: 字幕去除器图形化界面入口（PySide6/PyQt6 自绘深色主题）
+@desc: Subtitle Remover 图形界面入口（PySide6/PyQt6 自绘深色主题）
 """
 
 import sys
@@ -19,7 +19,7 @@ from ui.theme.stylesheet import build_stylesheet
 # ============ 日志配置 ============
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.cache')
 os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, 'asr.log')
+LOG_FILE = os.path.join(LOG_DIR, 'subtitle-remover.log')
 
 _root_logger = logging.getLogger()
 _root_logger.setLevel(logging.DEBUG)
@@ -66,11 +66,11 @@ if os.path.isdir(APP_TEMP_DIR):
             pass
 
 logger.info('=' * 60)
-logger.info('app_start: video subtitle remover v%s', '1.5')
+logger.info('app_start: Subtitle Remover v%s', '1.5')
 logger.info('=' * 60)
 
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "ui", "icon", "asr.ico")
+                         "ui", "icon", "subtitle-remover.ico")
 
 
 def _fix_taskbar_icon(window):
@@ -80,7 +80,7 @@ def _fix_taskbar_icon(window):
     import ctypes
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            'vsr.subtitleremover.1')
+            'mitcehub.SubtitleRemover')
         WM_SETICON = 0x0080
         ICON_BIG = 1
         ICON_SMALL = 0

@@ -1,11 +1,13 @@
 [简体中文](README.md) | English
 
+# Subtitle Remover
+
 ## Project Introduction
 
 ![python version](https://img.shields.io/badge/Python-3.12+-blue.svg)
 ![support os](https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-green.svg)
 
-Video-subtitle-remover (VSR) is an AI video-inpainting tool that removes hardcoded subtitles from videos.
+Subtitle Remover is an AI video-inpainting tool that removes hardcoded subtitles from videos.
 It is built on **retrained versions of three open-source video completion models — STTN, E2FGVI, and ProPainter**,
 optimized specifically for subtitle and text-watermark scenarios. It fills subtitle areas at the original
 resolution and produces subtitle-free videos.
@@ -15,9 +17,6 @@ Key features:
 - Drag to select subtitle areas on the preview, or use a track-based timeline for precise range control
 - Real-time original/result comparison during processing, with frame-by-frame and variable-speed playback
 - Modern PyQt6 UI with an advanced settings panel — adjust parameters without editing config files
-
-> **Note**: Despite sharing the same name, this project is independent of
-> [YaoFANGUK/video-subtitle-remover](https://github.com/YaoFANGUK/video-subtitle-remover). They are not the same project.
 
 ![Screenshot](doc/Screenshot.png)
 

@@ -34,7 +34,7 @@ class MainWindow(QMainWindow):
         self.resize(1246, 810)
         self.setMinimumSize(960, 640)
         self.setWindowIcon(QtGui.QIcon(
-            os.path.join(BASE_DIR, 'ui', 'icon', 'asr.ico')))
+            os.path.join(BASE_DIR, 'ui', 'icon', 'subtitle-remover.ico')))
 
         root = QWidget()
         root.setObjectName('Root')
@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
 
     def _build_title(self):
         """基础标题 + 当前硬件信息。"""
-        base = "Video Subtitle Remover"
+        base = "Subtitle Remover"
         return f"{base}  —  {self._hw_text}" if self._hw_text else base
 
     def _apply_hw_text(self, text):

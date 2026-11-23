@@ -1,15 +1,17 @@
 简体中文 | [English](README_en.md)
 
 <div align="center">
-  <img src="ui/icon/asr.ico" alt="VSR Logo" width="128" height="128">
+  <img src="ui/icon/subtitle-remover.ico" alt="Subtitle Remover Logo" width="128" height="128">
 </div>
+
+# Subtitle Remover
 
 ## 项目简介
 
 ![python version](https://img.shields.io/badge/Python-3.12+-blue.svg)
 ![support os](https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-green.svg)
 
-Video-subtitle-remover (VSR) 是一款基于 AI 视频修复技术的硬字幕去除工具。它在 **STTN、E2FGVI、ProPainter**
+Subtitle Remover 是一款基于 AI 视频修复技术的硬字幕去除工具。它在 **STTN、E2FGVI、ProPainter**
 三种开源视频补全模型的基础上二次训练，针对字幕与文字水印场景做了专项优化，以原分辨率填充字幕区域并生成无字幕视频。
 
 主要功能：
@@ -17,9 +19,6 @@ Video-subtitle-remover (VSR) 是一款基于 AI 视频修复技术的硬字幕�
 - 在预览画面上拖拽框选字幕区域，或用轨道式时间轴精确控制处理区间
 - 处理中实时预览原片与结果对比，支持逐帧、变速播放与快捷键操作
 - PyQt6 现代界面，参数均可在设置面板中调整，无需手动改配置文件
-
-> **说明**：本项目与 [YaoFANGUK/video-subtitle-remover](https://github.com/YaoFANGUK/video-subtitle-remover)
-> 是同名但相互独立的项目，二者并非同一项目。
 
 ![Screenshot](doc/Screenshot.png)
 
@@ -73,4 +72,3 @@ python gui.py
 ## 使用声明
 
 本项目仅供个人学习与研究使用，**非商业用途**。如需商业使用，请联系作者获得授权。
-
