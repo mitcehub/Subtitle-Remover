@@ -249,6 +249,8 @@ class Config:
     propainterLocalFrames = ConfigItem("ProPainter", "LocalFrames", 10, RangeValidator(10, 20))
     propainterReferenceFrames = ConfigItem("ProPainter", "ReferenceFrames", 10, RangeValidator(10, 20))
     propainterStride = ConfigItem("ProPainter", "Stride", 5, RangeValidator(1, 5))
+    propainterChunkFrames = ConfigItem(
+        "ProPainter", "ChunkFrames", 300, RangeValidator(120, 3600))
 
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", True, BoolValidator())
 
@@ -287,6 +289,13 @@ class Config:
         self._raw = data
         for item in self._items:
             section = data.get(item.group)
+            if (item.group == 'ProPainter' and item.name == 'ChunkFrames'
+                    and isinstance(section, dict)
+                    and item.name not in section
+                    and 'ReferenceChunkFrames' in section):
+                # Migrate the earlier reference-search-only setting while
+                # preserving the user's selected frame count.
+                section[item.name] = section.pop('ReferenceChunkFrames')
             if isinstance(section, dict) and item.name in section:
                 try:
                     item.load(section[item.name])

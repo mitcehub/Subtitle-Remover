@@ -12,6 +12,23 @@ VIDEO_EXTENSIONS = {
     '.m2v', '.svi', '.mxf', '.roq', '.nsv', '.f4p'
 }
 
+_INPAINT_OUTPUT_NAMES = {
+    'sttn-auto': 'sttn',
+    'e2fgvi': 'e2fgvi',
+    'propainter': 'propainter',
+}
+
+
+def get_inpaint_output_name(mode):
+    """Return a stable, filename-safe short name for an inpainting mode."""
+    value = getattr(mode, 'value', mode)
+    return _INPAINT_OUTPUT_NAMES.get(str(value), 'inpaint')
+
+
+def get_model_output_stem(stem, mode):
+    """Build the shared ``<input>_<model>_no_sub`` output stem."""
+    return f'{stem}_{get_inpaint_output_name(mode)}_no_sub'
+
 
 def get_readable_path(path):
     if sys.platform != 'win32':

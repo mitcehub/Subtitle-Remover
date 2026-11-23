@@ -26,7 +26,7 @@ from tqdm import tqdm
 from torchvision.ops import deform_conv2d as _deform_conv2d
 
 from infra.config import config
-from infra.utils import is_frame_in_sections
+from infra.utils import get_model_output_stem, is_frame_in_sections
 from core.inpaint.region import get_inpaint_area_by_mask, get_tight_inpaint_area
 from core.video_io.ffmpeg import FFmpegCLI
 from core.video_io.video_reader import FramePrefetcher, create_video_capture
@@ -1170,9 +1170,10 @@ class E2FGVIInpaint:
                         prior_logits_pre=prior_logits_c[all_ids])
                 pred = pred.float().view(1, -1, 3, MODEL_H, MODEL_W)
 
+                outputs_cpu = pred[0, :l_t].detach().permute(0, 2, 3, 1).cpu().numpy()
                 for i in range(l_t):
                     idx = neighbor_ids[i]
-                    out = pred[0, i].cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5
+                    out = outputs_cpu[i] * 0.5 + 0.5
                     p = prior_np[idx][..., None]
                     blended = (p * out + (1 - p) * rgb_frames[idx]).clip(0, 1).astype(np.float32)
 
@@ -1197,7 +1198,7 @@ class E2FGVIAutoInpaint:
         self.video_path = video_path
         self.video_out_path = os.path.join(
             os.path.dirname(os.path.abspath(video_path)),
-            f"{os.path.basename(video_path).rsplit('.', 1)[0]}_no_sub.mp4"
+            f"{get_model_output_stem(os.path.splitext(os.path.basename(video_path))[0], 'e2fgvi')}.mp4"
         )
         raw_max_load = config.e2fgviMaxFrames.value
         min_chunk = config.e2fgviNeighborStride.value * config.e2fgviReferenceLength.value
@@ -1352,7 +1353,10 @@ class E2FGVIAutoInpaint:
                             idx += 1
 
                     for j in range(valid_count):
-                        original = frames_hr[j].copy() if gui_mode else None
+                        preview_due = (
+                            gui_mode and input_sub_remover is not None
+                            and input_sub_remover._should_emit_preview())
+                        original = frames_hr[j].copy() if preview_due else None
                         frame = frames_hr[j]
 
                         do_composite = j in processed_map
@@ -1392,8 +1396,8 @@ class E2FGVIAutoInpaint:
                         if input_sub_remover:
                             if tbar:
                                 input_sub_remover.update_progress(tbar, 1)
-                            if original is not None and gui_mode:
-                                input_sub_remover._emit_preview(original, frame)
+                            if original is not None:
+                                input_sub_remover._emit_reserved_preview(original, frame)
                 else:
                     for j in range(valid_count):
                         writer.write(frames_hr[j])
@@ -1402,7 +1406,9 @@ class E2FGVIAutoInpaint:
                             if tbar:
                                 input_sub_remover.update_progress(tbar, 1)
                             if gui_mode:
-                                input_sub_remover._emit_preview(frames_hr[j], frames_hr[j])
+                                if input_sub_remover._should_emit_preview():
+                                    input_sub_remover._emit_reserved_preview(
+                                        frames_hr[j], frames_hr[j])
 
                 if end_of_stream:
                     break

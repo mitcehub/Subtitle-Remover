@@ -3,6 +3,7 @@
 运行：python -m unittest tests.test_regressions -v
 """
 
+import io
 import os
 import sys
 import tempfile
@@ -17,7 +18,13 @@ from core.subtitle_remover import ProcessingCallbacks, SubtitleRemover
 from core.inpaint.region import create_mask
 from core.inpaint.sttn import STTNAutoInpaint
 from core.inpaint.e2fgvi import E2FGVIAutoInpaint
-from infra.utils import paths_refer_to_same_file
+from core.inpaint.propainter import (
+    _iter_video_chunks,
+    _release_reference_cache,
+    _select_reference_indices,
+    ProPainterAutoInpaint,
+)
+from infra.utils import get_inpaint_output_name, paths_refer_to_same_file
 from ui.coordinate_mapper import CoordinateMapper
 from ui.preview_decoder import PreviewDecoder
 from ui.pages.home_page import HomePage
@@ -112,19 +119,166 @@ class TestPreviewDecoderCache(unittest.TestCase):
         self.assertIsNone(PreviewDecoder._prepare(None))
 
 
+class TestProPainterReferenceSelection(unittest.TestCase):
+    def test_top_k_matches_stable_full_sort(self):
+        rng = np.random.default_rng(12)
+        index = rng.integers(0, 256, size=(23, 18, 32), dtype=np.uint8)
+        anchor = index[7]
+        excluded = [6, 7, 8]
+        count = 5
+        scores = np.abs(index.astype(np.float32) - anchor.astype(np.float32)).mean(
+            axis=(1, 2))
+        scores[excluded] = np.inf
+        expected = sorted(np.argsort(scores, kind='stable')[:count].tolist())
+
+        self.assertEqual(
+            _select_reference_indices(index, anchor, excluded, count, tile_size=4),
+            expected)
+
+    def test_equal_scores_preserve_stable_tie_order(self):
+        index = np.zeros((12, 18, 32), dtype=np.uint8)
+        self.assertEqual(
+            _select_reference_indices(index, index[0], [0, 1], 4, tile_size=3),
+            [2, 3, 4, 5])
+
+    def test_processing_chunks_cover_cores_once_with_overlap(self):
+        chunks = list(_iter_video_chunks(total=50, chunk_frames=20, overlap=3))
+
+        self.assertEqual(
+            chunks,
+            [(0, 20, 0, 23), (20, 40, 17, 43), (40, 50, 37, 50)])
+        cores = [frame for start, end, _, _ in chunks for frame in range(start, end)]
+        self.assertEqual(cores, list(range(50)))
+
+    def test_reference_cache_reads_only_requested_chunk(self):
+        class FakeCapture:
+            def __init__(self, frames):
+                self.frames = frames
+                self.pos = 0
+                self.released = False
+
+            def set(self, _prop, frame_index):
+                self.pos = int(frame_index)
+                return True
+
+            def get(self, _prop):
+                return self.pos
+
+            def read(self):
+                if self.pos >= len(self.frames):
+                    return False, None
+                frame = self.frames[self.pos]
+                self.pos += 1
+                return True, frame
+
+            def release(self):
+                self.released = True
+
+        frames = [np.full((24, 32, 3), i, dtype=np.uint8) for i in range(10)]
+        cap = FakeCapture(frames)
+        obj = ProPainterAutoInpaint.__new__(ProPainterAutoInpaint)
+        obj.video_path = 'fake-video'
+        with mock.patch('core.inpaint.propainter.create_video_capture',
+                        return_value=cap):
+            index, ref_mm, ref_path, _ = obj._build_index_and_refs(
+                (0, 0, 32, 24), 3, 8)
+        try:
+            self.assertEqual(index.shape, (5, 18, 32))
+            self.assertEqual(ref_mm.shape[0], 5)
+            self.assertEqual(cap.pos, 8)
+            self.assertTrue(cap.released)
+        finally:
+            _release_reference_cache(ref_mm, ref_path)
+
+    def test_chunk_processor_emits_each_core_frame_once(self):
+        class FakeCapture:
+            def __init__(self, frames):
+                self.frames = frames
+                self.pos = 0
+
+            def read(self):
+                if self.pos >= len(self.frames):
+                    return False, None
+                frame = self.frames[self.pos]
+                self.pos += 1
+                return True, frame
+
+            def release(self):
+                pass
+
+        class FakeInpaint:
+            device = 'cpu'
+
+            def inpaint_window(self, win, num_local):
+                b, _, _, h, w = win.shape
+                return win[:, :num_local], np.zeros(
+                    (b, num_local, h, w), dtype=np.float32)
+
+        class FakeWriter:
+            def __init__(self):
+                self.frames = []
+
+            def write(self, frame):
+                self.frames.append(frame.copy())
+
+        frames = [
+            np.full((24, 32, 3), i, dtype=np.uint8)
+            for i in range(5)
+        ]
+        obj = ProPainterAutoInpaint.__new__(ProPainterAutoInpaint)
+        obj.video_path = 'fake-video'
+        obj.inpaint = FakeInpaint()
+        writer = FakeWriter()
+        index = np.zeros((5, 18, 32), dtype=np.uint8)
+        refs = np.zeros((5, 120, 640, 3), dtype=np.uint8)
+        cap = FakeCapture(frames)
+
+        with mock.patch('core.inpaint.propainter.create_video_capture',
+                        return_value=cap):
+            written = obj._process_chunk(
+                writer, index, refs, (640, 120), (0, 0, 32, 24),
+                video_total=5, sections=[(0, 5)], local=3, ref_frames=1,
+                stride=2, core_start=0, core_end=5,
+                context_start=0, context_end=5,
+                input_sub_remover=None, tbar=None, gui_mode=False)
+
+        self.assertEqual(written, 5)
+        self.assertEqual(len(writer.frames), 5)
+        for actual, expected in zip(writer.frames, frames):
+            np.testing.assert_array_equal(actual, expected)
+
+
+class TestVideoWriterBuffer(unittest.TestCase):
+    def test_write_accepts_non_contiguous_frame_without_bytes_copy(self):
+        from core.video_io.video_writer import FFmpegVideoWriter
+
+        writer = FFmpegVideoWriter.__new__(FFmpegVideoWriter)
+        writer._broken = False
+        writer._failed = False
+        writer._frames_written = 0
+        writer._size = (2, 2)
+        writer._process = SimpleNamespace(stdin=io.BytesIO())
+        frame = np.arange(2 * 4 * 3, dtype=np.uint8).reshape(2, 4, 3)[:, ::2]
+
+        writer.write(frame)
+
+        self.assertEqual(writer._process.stdin.getvalue(), frame.copy().tobytes())
+        self.assertEqual(writer.frames_written, 1)
+
+
 class TestSafeOutputPath(unittest.TestCase):
     """输出路径以 O_EXCL 原子预留，避免覆盖文件或跟随既有符号链接。"""
 
     def test_existing_file_gets_suffix(self):
         with tempfile.TemporaryDirectory() as d:
-            path = HomePage._safe_output_path(d, 'video', '.mp4')
-            self.assertEqual(os.path.basename(path), 'video_no_sub.mp4')
+            path = HomePage._safe_output_path(d, 'video', '.mp4', 'e2fgvi')
+            self.assertEqual(os.path.basename(path), 'video_e2fgvi_no_sub.mp4')
             self.assertTrue(os.path.isfile(path))
             # 创建一个同名文件后再次生成，应换名而非复用
             with open(path, 'wb'):
                 pass
-            path2 = HomePage._safe_output_path(d, 'video', '.mp4')
-            self.assertEqual(os.path.basename(path2), 'video_no_sub_1.mp4')
+            path2 = HomePage._safe_output_path(d, 'video', '.mp4', 'e2fgvi')
+            self.assertEqual(os.path.basename(path2), 'video_e2fgvi_no_sub_1.mp4')
             self.assertTrue(os.path.isfile(path2))
 
     def test_symlink_is_avoided(self):
@@ -132,14 +286,21 @@ class TestSafeOutputPath(unittest.TestCase):
             target = os.path.join(d, 'secret.txt')
             with open(target, 'wb'):
                 pass
-            link = os.path.join(d, 'video_no_sub.mp4')
+            link = os.path.join(d, 'video_e2fgvi_no_sub.mp4')
             try:
                 os.symlink(target, link)
             except (OSError, NotImplementedError):
                 self.skipTest('symlink not supported')
-            path = HomePage._safe_output_path(d, 'video', '.mp4')
+            path = HomePage._safe_output_path(d, 'video', '.mp4', 'e2fgvi')
             self.assertNotEqual(path, link)
-            self.assertEqual(os.path.basename(path), 'video_no_sub_1.mp4')
+            self.assertEqual(os.path.basename(path), 'video_e2fgvi_no_sub_1.mp4')
+
+    def test_model_names_are_stable_and_short(self):
+        from infra.config import InpaintMode
+
+        self.assertEqual(get_inpaint_output_name(InpaintMode.STTN_AUTO), 'sttn')
+        self.assertEqual(get_inpaint_output_name(InpaintMode.E2FGVI), 'e2fgvi')
+        self.assertEqual(get_inpaint_output_name(InpaintMode.PROPAINTER), 'propainter')
 
 
 class TestInputOutputPathSafety(unittest.TestCase):
@@ -220,6 +381,35 @@ class TestAudioMergeFallback(unittest.TestCase):
             with open(output, 'rb') as f:
                 self.assertEqual(f.read(), b'processed')
             obj.video_temp_file.close.assert_called_once()
+
+
+class TestProcessingCallbackThrottling(unittest.TestCase):
+    def test_preview_slot_limits_full_frame_copies(self):
+        obj = SubtitleRemover.__new__(SubtitleRemover)
+        obj._last_preview_time = 0.0
+        with mock.patch('core.subtitle_remover.time.monotonic',
+                        side_effect=[1.0, 1.05, 1.11]):
+            self.assertTrue(obj._should_emit_preview())
+            self.assertFalse(obj._should_emit_preview())
+            self.assertTrue(obj._should_emit_preview())
+
+    def test_progress_callbacks_are_throttled(self):
+        obj = SubtitleRemover.__new__(SubtitleRemover)
+        obj._last_progress_time = 0.0
+        obj._last_progress_pct = -1
+        obj.progress_total = 0
+        obj.isFinished = False
+        obj.callbacks = ProcessingCallbacks(on_progress=mock.Mock())
+        bar = SimpleNamespace(n=0, total=1000)
+        bar.update = lambda increment: setattr(bar, 'n', bar.n + increment)
+
+        with mock.patch('core.subtitle_remover.time.monotonic',
+                        side_effect=[1.0, 1.01, 1.2]):
+            obj.update_progress(bar, 1)
+            obj.update_progress(bar, 1)
+            obj.update_progress(bar, 1)
+
+        self.assertEqual(obj.callbacks.on_progress.call_count, 2)
 
 
 if __name__ == '__main__':

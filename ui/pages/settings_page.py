@@ -44,7 +44,7 @@ class SettingsPage(QWidget):
     # ---- 分组 ----
 
     def _build_basic(self):
-        card = Card(tr["Setting"]["AdvancedSetting"])
+        card = Card(tr["Setting"]["BasicSetting"])
         labels = list(config.interfaceTexts.keys())
         self.language_field = ComboBoxField(
             tr["SubtitleExtractorGUI"]["InterfaceLanguage"],
@@ -84,6 +84,11 @@ class SettingsPage(QWidget):
 
     def _build_propainter(self):
         card = Card(tr["Setting"]["ProPainterSetting"])
+        card.add(RangeField(
+            tr["Setting"]["ProPainterChunkFrames"],
+            config.propainterChunkFrames,
+            tr["Setting"]["ProPainterChunkFramesDesc"]))
+        card.add(divider())
         card.add(RangeField(tr["Setting"]["ProPainterLocalFrames"], config.propainterLocalFrames,
                             tr["Setting"]["ProPainterLocalFramesDesc"]))
         card.add(divider())

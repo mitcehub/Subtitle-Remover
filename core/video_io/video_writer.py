@@ -73,8 +73,10 @@ class FFmpegVideoWriter:
                 f'expected {self._size[0]}x{self._size[1]}')
         if frame.dtype != np.uint8:
             frame = np.clip(frame, 0, 255).astype(np.uint8)
+        if not frame.flags.c_contiguous:
+            frame = np.ascontiguousarray(frame)
         try:
-            self._process.stdin.write(frame.tobytes())
+            self._process.stdin.write(memoryview(frame).cast('B'))
         except BrokenPipeError:
             self._broken = True
             self._failed = True

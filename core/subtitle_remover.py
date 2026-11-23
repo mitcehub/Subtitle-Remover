@@ -15,7 +15,11 @@ from tqdm import tqdm
 
 from infra.config import config, tr, MODEL_PATH, InpaintMode, resolve_model_path
 from infra.hardware import HardwareAccelerator
-from infra.utils import get_readable_path, paths_refer_to_same_file
+from infra.utils import (
+    get_readable_path,
+    get_model_output_stem,
+    paths_refer_to_same_file,
+)
 from core.inpaint.sttn import STTNAutoInpaint
 from core.inpaint.e2fgvi import E2FGVIAutoInpaint
 from core.inpaint.propainter import ProPainterAutoInpaint
@@ -70,7 +74,9 @@ class SubtitleRemover:
         self.video_temp_file = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
         self.video_temp_file.close()  # 立即关闭句柄，否则 Windows 上 ffmpeg 无法写入同一路径
         self.video_writer = None
-        self.video_out_path = os.path.abspath(os.path.join(os.path.dirname(video_path), f'{self.vd_name}_no_sub.mp4'))
+        output_stem = get_model_output_stem(self.vd_name, config.inpaintMode.value)
+        self.video_out_path = os.path.abspath(os.path.join(
+            os.path.dirname(video_path), f'{output_stem}.mp4'))
 
         self.progress_total = 0
         self.isFinished = False
@@ -78,6 +84,8 @@ class SubtitleRemover:
         self.ab_sections = None
         self.track_data = None
         self._last_preview_time = 0.0
+        self._last_progress_time = 0.0
+        self._last_progress_pct = -1
 
     def _emit_log(self, *args):
         msg = ' '.join(str(a) for a in args)
@@ -89,10 +97,22 @@ class SubtitleRemover:
 
     def _emit_preview(self, frame_ori, frame_comp):
         # 节流：预览只用于可视化，没必要每帧都做 copy + 跨进程传输
-        now = time.time()
+        now = time.monotonic()
         if now - self._last_preview_time < self.PREVIEW_MIN_INTERVAL:
             return
         self._last_preview_time = now
+        self.callbacks.on_preview(frame_ori, frame_comp)
+
+    def _should_emit_preview(self):
+        """预留一次预览发送时隙，让调用方只在确实发送时复制原始帧。"""
+        now = time.monotonic()
+        if now - self._last_preview_time < self.PREVIEW_MIN_INTERVAL:
+            return False
+        self._last_preview_time = now
+        return True
+
+    def _emit_reserved_preview(self, frame_ori, frame_comp):
+        """发送已由 _should_emit_preview 预留时隙的预览。"""
         self.callbacks.on_preview(frame_ori, frame_comp)
 
     def update_progress(self, tbar, increment):
@@ -100,7 +120,12 @@ class SubtitleRemover:
         total = getattr(tbar, 'total', 0) or 0
         pct = int((tbar.n / total) * 100) if total > 0 else 0
         self.progress_total = max(0, min(100, pct))
-        self._emit_progress()
+        now = time.monotonic()
+        if (self.progress_total != self._last_progress_pct
+                or now - self._last_progress_time >= 0.1):
+            self._last_progress_pct = self.progress_total
+            self._last_progress_time = now
+            self._emit_progress()
 
     def run(self):
         start_time = time.time()

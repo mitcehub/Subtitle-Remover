@@ -26,7 +26,7 @@ from ui.playback_controller import PlaybackController
 from app.pipeline import ProcessingPipeline
 from infra.config import config, tr
 from infra.process_manager import ProcessManager
-from infra.utils import get_readable_path
+from infra.utils import get_readable_path, get_model_output_stem
 from core.video_io.video_reader import create_video_capture
 from core.inpaint.region import get_tight_inpaint_area
 from ui.preview_decoder import PreviewDecoder
@@ -663,16 +663,18 @@ class HomePage(QWidget):
     # ==================== 运行 / 停止 ====================
 
     @staticmethod
-    def _safe_output_path(save_dir, stem, ext):
+    def _safe_output_path(save_dir, stem, ext, model_name):
         """原子预留一个新的输出路径，避免覆盖现有文件或符号链接。
 
         使用 O_EXCL 创建占位文件，避免“先检查、后创建”之间的竞态。
         FFmpeg 随后会写入该预留路径；如果任务失败，调用方负责清理残留文件。
         """
         os.makedirs(save_dir, exist_ok=True)
+        output_stem = get_model_output_stem(stem, model_name)
         idx = 1
         while True:
-            name = f'{stem}_no_sub{ext}' if idx == 1 else f'{stem}_no_sub_{idx - 1}{ext}'
+            suffix = '' if idx == 1 else f'_{idx - 1}'
+            name = f'{output_stem}{suffix}{ext}'
             candidate = os.path.abspath(os.path.join(save_dir, name))
             try:
                 fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -682,7 +684,7 @@ class HomePage(QWidget):
             os.close(fd)
             if idx > 1:
                 logger.info('output_path_avoided_existing: %s -> %s',
-                            os.path.join(save_dir, f'{stem}_no_sub{ext}'), candidate)
+                            os.path.join(save_dir, f'{output_stem}{ext}'), candidate)
             return candidate
 
     def run_button_clicked(self):
@@ -752,7 +754,8 @@ class HomePage(QWidget):
             save_dir = config.saveDirectory.value if config.saveDirectory.value else os.path.dirname(self.video_path)
             stem = Path(self.video_path).stem
             ext = Path(self.video_path).suffix
-            self.output_path = self._safe_output_path(save_dir, stem, ext)
+            self.output_path = self._safe_output_path(
+                save_dir, stem, ext, config.inpaintMode.value)
             task_output_path = self.output_path
 
             def task():

@@ -16,7 +16,7 @@ import numpy as np
 from tqdm import tqdm
 
 from infra.config import config
-from infra.utils import is_frame_in_sections
+from infra.utils import get_model_output_stem, is_frame_in_sections
 from core.inpaint.region import get_inpaint_area_by_mask, get_tight_inpaint_area
 from core.video_io.ffmpeg import FFmpegCLI
 from core.video_io.video_reader import FramePrefetcher, create_video_capture
@@ -364,9 +364,10 @@ class STTNInpaint:
                     feat_win = self.model.transformer({'x': feat_win, 'b': 1, 'c': enc_feat.shape[1]})['x']
                     output = torch.tanh(self.model.decoder(feat_win)).float()
 
+                outputs_cpu = output[:l_t].detach().permute(0, 2, 3, 1).cpu().numpy()
                 for i in range(l_t):
                     idx = neighbor_ids[i]
-                    out = (output[i].cpu().permute(1, 2, 0).numpy() * 0.5 + 0.5).astype(np.float32)
+                    out = (outputs_cpu[i] * 0.5 + 0.5).astype(np.float32)
                     # 模型分辨率软融合：连续 prior 概率加权（与训练 blend 对齐），
                     # 避免硬切侵蚀细笔画边缘；融合后再参与滑窗重叠平均
                     p = prior_np[idx][..., None]
@@ -393,7 +394,7 @@ class STTNAutoInpaint:
         self.video_path = video_path
         self.video_out_path = os.path.join(
             os.path.dirname(os.path.abspath(video_path)),
-            f"{os.path.basename(video_path).rsplit('.', 1)[0]}_no_sub.mp4"
+            f"{get_model_output_stem(os.path.splitext(os.path.basename(video_path))[0], 'sttn-auto')}.mp4"
         )
         raw_max_load = config.sttnMaxLoadNum.value
         min_chunk = config.sttnNeighborStride.value * config.sttnReferenceLength.value
@@ -558,7 +559,10 @@ class STTNAutoInpaint:
                             idx += 1
 
                     for j in range(valid_count):
-                        original = frames_hr[j].copy() if gui_mode else None
+                        preview_due = (
+                            gui_mode and input_sub_remover is not None
+                            and input_sub_remover._should_emit_preview())
+                        original = frames_hr[j].copy() if preview_due else None
                         frame = frames_hr[j]
 
                         # 按帧判断是否在 track 时间范围内，避免 chunk 边界帧被多余处理
@@ -602,8 +606,8 @@ class STTNAutoInpaint:
                         if input_sub_remover:
                             if tbar:
                                 input_sub_remover.update_progress(tbar, 1)
-                            if original is not None and gui_mode:
-                                input_sub_remover._emit_preview(original, frame)
+                            if original is not None:
+                                input_sub_remover._emit_reserved_preview(original, frame)
                 else:
                     for j in range(valid_count):
                         writer.write(frames_hr[j])
@@ -612,7 +616,9 @@ class STTNAutoInpaint:
                             if tbar:
                                 input_sub_remover.update_progress(tbar, 1)
                             if gui_mode:
-                                input_sub_remover._emit_preview(frames_hr[j], frames_hr[j])
+                                if input_sub_remover._should_emit_preview():
+                                    input_sub_remover._emit_reserved_preview(
+                                        frames_hr[j], frames_hr[j])
 
                 if end_of_stream:
                     break

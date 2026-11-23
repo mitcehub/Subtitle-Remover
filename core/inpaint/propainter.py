@@ -7,8 +7,8 @@
 以及推理流式逻辑（core/video.py stream_propainter）。
 
 与 STTN/E2FGVI 的关键差异（必须按 ProPainter 自身特性，不能照搬）：
-- **没有 chunk 概念**：流式滑窗 local=10 + ref=10，stride=5；
-- ref 帧不是固定间隔采样，而是用 18×32 灰度缩略图做**全局相似度选择**；
+- 按固定帧数 chunk 处理；每块保留 local 窗口重叠，块内使用流式 local 窗口；
+- ref 帧不是固定间隔采样，而是在当前 chunk 内用 18×32 灰度缩略图做相似度选择；
 - RAFT 光流需独立权重 raft-things.pth，在含字原帧上现算；
 - encoder 输入 5 通道（RGB + mask_in + mask_updated），输入归一化到 [-1,1]；
 - 输出软融合：final = p × pred + (1−p) × 原帧（p = sigmoid(prior_logits)）。
@@ -30,7 +30,9 @@ import torchvision
 from tqdm import tqdm
 
 from infra.config import config
+from infra.utils import get_model_output_stem
 from core.inpaint.region import get_inpaint_area_by_mask, get_tight_inpaint_area
+from core.video_io.ffmpeg import FFmpegCLI
 from core.video_io.video_reader import create_video_capture
 
 logger = logging.getLogger(__name__)
@@ -1413,6 +1415,79 @@ def _build_starts(sections, local, stride):
     return starts
 
 
+def _select_reference_indices(index, anchor, excluded_ids, count, tile_size=8192):
+    """Bounded-memory top-k search with the same stable tie handling as argsort."""
+    total = len(index)
+    if count <= 0 or total == 0:
+        return []
+
+    scores = np.empty(total, dtype=np.float32)
+    anchor_i16 = anchor.astype(np.int16, copy=False)
+    for start in range(0, total, tile_size):
+        end = min(start + tile_size, total)
+        delta = index[start:end].astype(np.int16)
+        np.subtract(delta, anchor_i16, out=delta)
+        np.abs(delta, out=delta)
+        scores[start:end] = delta.mean(axis=(1, 2), dtype=np.float32)
+
+    if excluded_ids:
+        scores[np.asarray(excluded_ids, dtype=np.intp)] = np.inf
+
+    count = min(count, total - len(excluded_ids))
+    if count <= 0:
+        return []
+    candidates = np.argpartition(scores, count - 1)[:count]
+    boundary = scores[candidates].max()
+    below = np.flatnonzero(scores < boundary)
+    tied = np.flatnonzero(scores == boundary)
+    selected = np.concatenate((below, tied[:count - len(below)]))
+    return sorted(selected.tolist())
+
+
+def _iter_video_chunks(total, chunk_frames, overlap):
+    """Yield non-overlapping output ranges plus context halos for inference."""
+    for core_start in range(0, total, chunk_frames):
+        core_end = min(core_start + chunk_frames, total)
+        context_start = max(0, core_start - overlap)
+        context_end = min(total, core_end + overlap)
+        yield core_start, core_end, context_start, context_end
+
+
+def _seek_video_capture(cap, frame_index):
+    """Seek a fresh VideoCapture to an exact frame, with a sequential fallback."""
+    if frame_index <= 0:
+        return
+    if cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index):
+        current = max(0, int(cap.get(cv2.CAP_PROP_POS_FRAMES) + 0.5))
+        if current == frame_index:
+            return
+    else:
+        current = max(0, int(cap.get(cv2.CAP_PROP_POS_FRAMES) + 0.5))
+    if current > frame_index:
+        raise RuntimeError(
+            f'视频解码器跳过了请求帧：期望 {frame_index}，当前位置 {current}')
+    logger.warning('propainter_seek_fallback: requested=%d, current=%d',
+                   frame_index, current)
+    for _ in range(frame_index - current):
+        ok, _ = cap.read()
+        if not ok:
+            raise RuntimeError(f'无法定位到视频帧 {frame_index}')
+
+
+def _release_reference_cache(ref_mm, ref_path):
+    if ref_mm is not None:
+        try:
+            ref_mm._mmap.close()
+        except Exception:
+            pass
+    if ref_path and os.path.exists(ref_path):
+        try:
+            os.remove(ref_path)
+        except OSError:
+            logger.warning('propainter_ref_cache_cleanup_failed: %s',
+                           ref_path, exc_info=True)
+
+
 class ProPainterAutoInpaint:
     """生产端入口：对齐 STTNAutoInpaint / E2FGVIAutoInpaint 的 __call__ 契约。"""
 
@@ -1421,7 +1496,7 @@ class ProPainterAutoInpaint:
         self.video_path = video_path
         self.video_out_path = os.path.join(
             os.path.dirname(os.path.abspath(video_path)),
-            f"{os.path.basename(video_path).rsplit('.', 1)[0]}_no_sub.mp4")
+            f"{get_model_output_stem(os.path.splitext(os.path.basename(video_path))[0], 'propainter')}.mp4")
 
     # ---------------------------------------------------------------- 工具
     @staticmethod
@@ -1448,27 +1523,26 @@ class ProPainterAutoInpaint:
                     return 0, y1, W, y2
         return 0, 0, W, H
 
-    def _build_index_and_refs(self, crop_box, total_hint):
-        """一趟顺序解码，同时产出：18×32 灰度索引 + 全片 ref 帧缓存文件。
-
-        ProPainter 的 ref 帧是全局相似度挑选的，若运行时逐窗口随机 seek 解码，
-        长视频会慢一个数量级。这里把每帧裁剪图（模型分辨率 RGB）顺序写进临时
-        文件，推理时按下标直接读，彻底消除随机 seek。
-        """
+    def _build_index_and_refs(self, crop_box, frame_start, frame_end):
+        """顺序解码一个处理块，生成灰度索引与块级参考帧缓存。"""
         x1, y1, x2, y2 = crop_box
         ref_size = (MODEL_W, MODEL_H)
         budget = 8 * 1024 ** 3
-        if total_hint and total_hint * MODEL_W * MODEL_H * 3 > budget:
+        frame_count = max(0, frame_end - frame_start)
+        if frame_count * MODEL_W * MODEL_H * 3 > budget:
             ref_size = (MODEL_W // 2, MODEL_H // 2)
-            logger.info('propainter_ref_cache_half_res: total=%d', total_hint)
+            logger.info('propainter_ref_cache_half_res: chunk_frames=%d', frame_count)
 
         cap = create_video_capture(self.video_path)
-        fd, ref_path = tempfile.mkstemp(prefix='pp_refs_', suffix='.dat')
-        os.close(fd)
+        ref_path = None
         thumbs = []
         try:
+            _seek_video_capture(cap, frame_start)
+
+            fd, ref_path = tempfile.mkstemp(prefix='pp_refs_', suffix='.dat')
+            os.close(fd)
             with open(ref_path, 'wb') as fh:
-                while True:
+                for _ in range(frame_start, frame_end):
                     ok, frame = cap.read()
                     if not ok:
                         break
@@ -1481,18 +1555,200 @@ class ProPainterAutoInpaint:
                         rgb, (MODEL_W, MODEL_H), interpolation=cv2.INTER_LINEAR)
                     thumbs.append(cv2.resize(cv2.cvtColor(small, cv2.COLOR_RGB2GRAY),
                                              (32, 18), interpolation=cv2.INTER_AREA))
+        except Exception:
+            _release_reference_cache(None, ref_path)
+            raise
         finally:
             cap.release()
         if not thumbs:
+            _release_reference_cache(None, ref_path)
             raise ValueError('视频没有可解码帧')
         total = len(thumbs)
-        ref_mm = np.memmap(ref_path, dtype=np.uint8, mode='r',
-                           shape=(total, ref_size[1], ref_size[0], 3))
+        expected = frame_end - frame_start
+        if total != expected:
+            _release_reference_cache(None, ref_path)
+            raise RuntimeError(
+                f'ProPainter 分块解码帧数不匹配：预期 {expected}，实际 {total} '
+                f'(范围 {frame_start}:{frame_end})')
+        try:
+            ref_mm = np.memmap(ref_path, dtype=np.uint8, mode='r',
+                               shape=(total, ref_size[1], ref_size[0], 3))
+        except Exception:
+            _release_reference_cache(None, ref_path)
+            raise
         return np.stack(thumbs), ref_mm, ref_path, ref_size
+
+    def _process_chunk(self, writer, index, ref_mm, ref_size, crop_box,
+                       video_total, sections, local, ref_frames, stride,
+                       core_start, core_end, context_start, context_end,
+                       input_sub_remover, tbar, gui_mode):
+        """Process one context window and emit only its non-overlapping core."""
+        x1, y1, x2, y2 = crop_box
+        crop_w, crop_h = x2 - x1, y2 - y1
+        context_sections = [
+            (max(start, context_start), min(end, context_end))
+            for start, end in sections
+            if max(start, context_start) < min(end, context_end)
+        ]
+        starts = _build_starts(context_sections, local, stride)
+        starts = [
+            start for start in starts
+            if start < core_end
+            and start + min(local, video_total - start) > core_start
+            and start + min(local, video_total - start) <= context_end
+        ]
+
+        cap = create_video_capture(self.video_path)
+        try:
+            _seek_video_capture(cap, context_start)
+            pending = {}
+            read_pos = context_start
+
+            def fill(upto):
+                nonlocal read_pos
+                while read_pos <= upto and read_pos < context_end:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    pending[read_pos] = frame
+                    read_pos += 1
+
+            sums, weights = {}, {}
+            write_index = context_start
+            written = 0
+
+            def emit(frame_idx):
+                nonlocal written
+                frame = pending.pop(frame_idx, None)
+                if frame is None:
+                    raise RuntimeError(f'输出帧 {frame_idx} 解码失败')
+
+                is_core = core_start <= frame_idx < core_end
+                preview_due = (
+                    is_core and gui_mode and input_sub_remover is not None
+                    and input_sub_remover._should_emit_preview())
+                original = frame.copy() if preview_due else None
+
+                if frame_idx in sums:
+                    crop_out = (sums.pop(frame_idx) / weights.pop(frame_idx)
+                                * 255).clip(0, 255).astype(np.uint8)
+                    frame[y1:y2, x1:x2] = cv2.cvtColor(
+                        crop_out, cv2.COLOR_RGB2BGR)
+
+                if is_core:
+                    writer.write(frame)
+                    written += 1
+                    if input_sub_remover is not None:
+                        if tbar:
+                            input_sub_remover.update_progress(tbar, 1)
+                        if original is not None:
+                            input_sub_remover._emit_reserved_preview(original, frame)
+
+            wi = 0
+            n_starts = len(starts)
+            while wi < n_starts:
+                l_t = min(local, video_total - starts[wi])
+                group = []
+                while wi < n_starts and len(group) < WINDOW_BATCH:
+                    start = starts[wi]
+                    if min(local, video_total - start) != l_t:
+                        break
+                    group.append(start)
+                    wi += 1
+
+                while write_index < group[0]:
+                    fill(write_index)
+                    emit(write_index)
+                    write_index += 1
+
+                fill(group[-1] + l_t - 1)
+                wins, metas = [], []
+                for start in group:
+                    local_ids = list(range(start, start + l_t))
+                    local_ids_in_chunk = [
+                        frame_id - context_start for frame_id in local_ids]
+                    anchor_index = start + l_t // 2 - context_start
+                    count = min(ref_frames, len(index) - l_t)
+                    refs = _select_reference_indices(
+                        index, index[anchor_index], local_ids_in_chunk, count)
+
+                    crops = [
+                        cv2.resize(cv2.cvtColor(
+                            pending[frame_id][y1:y2, x1:x2],
+                            cv2.COLOR_BGR2RGB),
+                            (MODEL_W, MODEL_H),
+                            interpolation=cv2.INTER_LINEAR)
+                        for frame_id in local_ids
+                    ]
+                    for ref_id in refs:
+                        img = np.asarray(ref_mm[ref_id])
+                        if ref_size != (MODEL_W, MODEL_H):
+                            img = cv2.resize(
+                                img, (MODEL_W, MODEL_H),
+                                interpolation=cv2.INTER_LINEAR)
+                        crops.append(img)
+                    arr = np.stack(crops).astype(np.float32) / 127.5 - 1.0
+                    wins.append(torch.from_numpy(arr).permute(0, 3, 1, 2))
+                    metas.append(local_ids)
+
+                win = torch.stack(wins, 0).to(self.inpaint.device)
+                with torch.no_grad():
+                    pred, deployed = self.inpaint.inpaint_window(win, l_t)
+
+                predicted = (pred.float().cpu().numpy().transpose(
+                    0, 1, 3, 4, 2) + 1) / 2
+                if not np.isfinite(predicted).all():
+                    raise RuntimeError('推理结果包含 NaN/Inf')
+
+                for batch_index, local_ids in enumerate(metas):
+                    for frame_offset, frame_id in enumerate(local_ids):
+                        repaired = cv2.resize(
+                            predicted[batch_index, frame_offset],
+                            (crop_w, crop_h), interpolation=cv2.INTER_LINEAR)
+                        prob = cv2.resize(
+                            deployed[batch_index, frame_offset],
+                            (crop_w, crop_h),
+                            interpolation=cv2.INTER_LINEAR)[..., None]
+                        original = cv2.cvtColor(
+                            pending[frame_id][y1:y2, x1:x2],
+                            cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                        blended = prob * repaired + (1 - prob) * original
+                        if frame_id in sums:
+                            sums[frame_id] += blended
+                            weights[frame_id] += 1
+                        else:
+                            sums[frame_id] = blended
+                            weights[frame_id] = 1
+
+                del win, pred
+                flush_until = starts[wi] if wi < n_starts else context_end
+                while write_index < flush_until:
+                    fill(write_index)
+                    emit(write_index)
+                    write_index += 1
+
+                if wi % 20 == 0 or wi >= n_starts:
+                    tqdm.write(
+                        f'Processing: {group[0] + 1} - '
+                        f'{group[-1] + l_t} / Total: {video_total} '
+                        f'(chunk {core_start + 1}-{core_end}, stride {stride})')
+
+                if wi % GC_INTERVAL == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+            while write_index < context_end:
+                fill(write_index)
+                emit(write_index)
+                write_index += 1
+            return written
+        finally:
+            cap.release()
 
     # ---------------------------------------------------------------- 主流程
     def __call__(self, input_mask=None, input_sub_remover=None, tbar=None, gui_mode=False):
-        cap = reader = writer = None
+        reader = writer = None
         ref_mm = ref_path = None
         written = 0
         try:
@@ -1503,6 +1759,13 @@ class ProPainterAutoInpaint:
             total_hint = int(reader.get(cv2.CAP_PROP_FRAME_COUNT) + 0.5)
             reader.release()
             reader = None
+            # Chunking needs an exact final boundary so every source frame is emitted once.
+            total = FFmpegCLI.instance().get_frame_count(self.video_path) or total_hint
+            if total <= 0:
+                raise RuntimeError('无法确定视频总帧数，ProPainter 分块处理已中止')
+            if total_hint > 0 and total_hint != total:
+                logger.info('propainter_frame_count_corrected: opencv=%d, ffmpeg=%d',
+                            total_hint, total)
 
             if input_sub_remover is not None:
                 ab_sections = input_sub_remover.ab_sections
@@ -1520,167 +1783,43 @@ class ProPainterAutoInpaint:
             logger.info('propainter_auto: crop=(%d,%d)-(%d,%d), size=%dx%d',
                         x1, y1, x2, y2, crop_w, crop_h)
 
-            index, ref_mm, ref_path, ref_size = self._build_index_and_refs(
-                crop_box, total_hint)
-            total = len(index)
             sections = _normalize_sections(ab_sections, total)
             local = min(self.inpaint.local_frames, total)
             ref_frames = self.inpaint.ref_frames
             stride = max(1, min(self.inpaint.stride, local))
-            starts = _build_starts(sections, local, stride)
-            logger.info('propainter_auto: total=%d, sections=%d, local=%d, ref=%d, '
-                        'stride=%d, windows=%d', total, len(sections), local,
-                        ref_frames, stride, len(starts))
+            chunk_frames = config.propainterChunkFrames.value
+            chunks = _iter_video_chunks(total, chunk_frames, local - 1)
+            chunk_count = (total + chunk_frames - 1) // chunk_frames
+            logger.info('propainter_auto: total=%d, chunks=%d, chunk_frames=%d, '
+                        'sections=%d, local=%d, ref=%d, stride=%d',
+                        total, chunk_count, chunk_frames, len(sections), local,
+                        ref_frames, stride)
 
-            # 第二趟：顺序解码，每帧只解一次；本地帧直接复用，ref 帧读缓存文件
-            cap = create_video_capture(self.video_path)
-            pending = {}
-            read_pos = 0
-
-            def fill(upto):
-                nonlocal read_pos
-                while read_pos <= upto:
-                    ok, fr = cap.read()
-                    if not ok:
-                        break
-                    pending[read_pos] = fr
-                    read_pos += 1
-
-            sums, weights = {}, {}
-            write_index = 0
-
-            def emit(frame_idx):
-                nonlocal written
-                frame = pending.pop(frame_idx, None)
-                if frame is None:
-                    raise RuntimeError(f'输出帧 {frame_idx} 解码失败')
-                original = frame.copy() if gui_mode else None
-                if frame_idx in sums:
-                    crop_out = (sums.pop(frame_idx) / weights.pop(frame_idx)
-                                * 255).clip(0, 255).astype(np.uint8)
-                    frame[y1:y2, x1:x2] = cv2.cvtColor(crop_out, cv2.COLOR_RGB2BGR)
-                writer.write(frame)
-                written += 1
-                if input_sub_remover is not None:
-                    if tbar:
-                        input_sub_remover.update_progress(tbar, 1)
-                    if gui_mode and original is not None:
-                        input_sub_remover._emit_preview(original, frame)
-
-            wi = 0
-            n_starts = len(starts)
-            while wi < n_starts:
-                # 把连续的若干独立窗口凑成一批（同 l_t 才能拼 batch）
-                l_t = min(local, total - starts[wi])
-                group = []
-                while wi < n_starts and len(group) < WINDOW_BATCH:
-                    start = starts[wi]
-                    if min(local, total - start) != l_t:
-                        break
-                    group.append(start)
-                    wi += 1
-
-                # 批次第一个窗口之前（含区块间隙）的帧按原样顺序写出
-                while write_index < group[0]:
-                    fill(write_index)
-                    emit(write_index)
-                    write_index += 1
-
-                fill(group[-1] + l_t - 1)
-
-                wins, metas = [], []
-                for start in group:
-                    local_ids = list(range(start, start + l_t))
-
-                    anchor = index[start + l_t // 2].astype(np.float32)
-                    scores = np.abs(index.astype(np.float32) - anchor).mean(axis=(1, 2))
-                    scores[local_ids] = np.inf
-                    count = min(ref_frames, total - l_t)
-                    refs = (sorted(np.argsort(scores, kind='stable')[:count].tolist())
-                            if count > 0 else [])
-
-                    crops = [cv2.resize(cv2.cvtColor(pending[i][y1:y2, x1:x2],
-                                                    cv2.COLOR_BGR2RGB),
-                                        (MODEL_W, MODEL_H),
-                                        interpolation=cv2.INTER_LINEAR)
-                             for i in local_ids]
-                    for i in refs:
-                        img = np.asarray(ref_mm[i])
-                        if ref_size != (MODEL_W, MODEL_H):
-                            img = cv2.resize(img, (MODEL_W, MODEL_H),
-                                             interpolation=cv2.INTER_LINEAR)
-                        crops.append(img)
-                    arr = np.stack(crops).astype(np.float32) / 127.5 - 1.0
-                    wins.append(torch.from_numpy(arr).permute(0, 3, 1, 2))
-                    metas.append(local_ids)
-
-                win = torch.stack(wins, 0).to(self.inpaint.device)
-
-                with torch.no_grad():
-                    pred, deployed = self.inpaint.inpaint_window(win, l_t)
-
-                predicted = (pred.float().cpu().numpy().transpose(0, 1, 3, 4, 2) + 1) / 2
-                if not np.isfinite(predicted).all():
-                    raise RuntimeError('推理结果包含 NaN/Inf')
-
-                for bi, local_ids in enumerate(metas):
-                    for k, frame_id in enumerate(local_ids):
-                        repaired = cv2.resize(predicted[bi, k], (crop_w, crop_h),
-                                              interpolation=cv2.INTER_LINEAR)
-                        prob = cv2.resize(deployed[bi, k], (crop_w, crop_h),
-                                          interpolation=cv2.INTER_LINEAR)[..., None]
-                        original = cv2.cvtColor(pending[frame_id][y1:y2, x1:x2],
-                                                cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-                        blended = prob * repaired + (1 - prob) * original
-                        if frame_id in sums:
-                            sums[frame_id] += blended
-                            weights[frame_id] += 1
-                        else:
-                            sums[frame_id] = blended
-                            weights[frame_id] = 1
-
-                del win, pred
-
-                flush_until = starts[wi] if wi < n_starts else total
-                while write_index < flush_until:
-                    fill(write_index)
-                    emit(write_index)
-                    write_index += 1
-
-                if wi % 20 == 0 or wi >= n_starts:
-                    tqdm.write(f'Processing: {group[0] + 1} - '
-                               f'{group[-1] + l_t} / Total: {total} '
-                               f'(stride {stride})')
-
-                if (wi // max(WINDOW_BATCH, 1)) % GC_INTERVAL == 0:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-            while write_index < total:
-                fill(write_index)
-                emit(write_index)
-                write_index += 1
+            for (core_start, core_end,
+                 context_start, context_end) in chunks:
+                index, ref_mm, ref_path, ref_size = self._build_index_and_refs(
+                    crop_box, context_start, context_end)
+                try:
+                    logger.info('propainter_chunk_start: core=%d:%d, context=%d:%d, '
+                                'cache_frames=%d',
+                                core_start, core_end, context_start, context_end,
+                                len(index))
+                    written += self._process_chunk(
+                        writer, index, ref_mm, ref_size, crop_box,
+                        total, sections, local, ref_frames, stride,
+                        core_start, core_end, context_start, context_end,
+                        input_sub_remover, tbar, gui_mode)
+                finally:
+                    _release_reference_cache(ref_mm, ref_path)
+                    ref_mm = ref_path = None
 
         except Exception as e:
             logger.error('propainter_process_error: %s', e)
             raise
         finally:
-            if cap is not None:
-                cap.release()
-            if ref_mm is not None:
-                try:
-                    ref_mm._mmap.close()
-                except Exception:
-                    pass
-                del ref_mm
-            if ref_path and os.path.exists(ref_path):
-                try:
-                    os.remove(ref_path)
-                except OSError:
-                    pass
             if reader is not None:
                 reader.release()
+            _release_reference_cache(ref_mm, ref_path)
             if writer is not None and input_sub_remover is None:
                 writer.release()
             logger.info('propainter_process_end: written=%d', written)
