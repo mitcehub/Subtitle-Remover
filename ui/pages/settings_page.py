@@ -10,7 +10,7 @@ from ui.widgets.button import GhostButton
 from ui.widgets.card import Card, divider
 from ui.widgets.field import ComboBoxField, PathField, RangeField
 
-PROJECT_URL = "https://github.com/mitcehub/subtitle-remover"
+PROJECT_URL = "https://github.com/mitcehub/Subtitle-Remover"
 
 
 class SettingsPage(QWidget):
