@@ -4,14 +4,20 @@
 """
 
 import os
+import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
+from core.cli import parse_args
+from core.subtitle_remover import ProcessingCallbacks, SubtitleRemover
 from core.inpaint.region import create_mask
 from core.inpaint.sttn import STTNAutoInpaint
 from core.inpaint.e2fgvi import E2FGVIAutoInpaint
+from infra.utils import paths_refer_to_same_file
 from ui.coordinate_mapper import CoordinateMapper
 from ui.preview_decoder import PreviewDecoder
 from ui.pages.home_page import HomePage
@@ -107,21 +113,21 @@ class TestPreviewDecoderCache(unittest.TestCase):
 
 
 class TestSafeOutputPath(unittest.TestCase):
-    """CWE-59：输出路径不得覆盖已有文件，也不得跟随符号链接。"""
+    """输出路径以 O_EXCL 原子预留，避免覆盖文件或跟随既有符号链接。"""
 
     def test_existing_file_gets_suffix(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as d:
             path = HomePage._safe_output_path(d, 'video', '.mp4')
             self.assertEqual(os.path.basename(path), 'video_no_sub.mp4')
+            self.assertTrue(os.path.isfile(path))
             # 创建一个同名文件后再次生成，应换名而非复用
             with open(path, 'wb'):
                 pass
             path2 = HomePage._safe_output_path(d, 'video', '.mp4')
             self.assertEqual(os.path.basename(path2), 'video_no_sub_1.mp4')
+            self.assertTrue(os.path.isfile(path2))
 
     def test_symlink_is_avoided(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as d:
             target = os.path.join(d, 'secret.txt')
             with open(target, 'wb'):
@@ -134,6 +140,86 @@ class TestSafeOutputPath(unittest.TestCase):
             path = HomePage._safe_output_path(d, 'video', '.mp4')
             self.assertNotEqual(path, link)
             self.assertEqual(os.path.basename(path), 'video_no_sub_1.mp4')
+
+
+class TestInputOutputPathSafety(unittest.TestCase):
+    def test_same_path_is_detected(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'video.mp4')
+            with open(path, 'wb'):
+                pass
+            self.assertTrue(paths_refer_to_same_file(path, path))
+
+    def test_hardlink_to_input_is_detected(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = os.path.join(d, 'input.mp4')
+            alias = os.path.join(d, 'output.mp4')
+            with open(source, 'wb') as f:
+                f.write(b'video')
+            try:
+                os.link(source, alias)
+            except (OSError, NotImplementedError):
+                self.skipTest('hardlinks not supported')
+            self.assertTrue(paths_refer_to_same_file(source, alias))
+
+    def test_different_paths_are_allowed(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = os.path.join(d, 'input.mp4')
+            output = os.path.join(d, 'output.mp4')
+            self.assertFalse(paths_refer_to_same_file(source, output))
+
+    def test_cli_rejects_output_equal_to_input(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = os.path.join(d, 'input.mp4')
+            with open(source, 'wb'):
+                pass
+            with mock.patch.object(sys, 'argv', ['cli', source, '--output', source]):
+                with self.assertRaises(SystemExit) as exc:
+                    parse_args()
+            self.assertEqual(exc.exception.code, 2)
+
+
+class TestAudioMergeFallback(unittest.TestCase):
+    def test_failed_fallback_copy_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            temp_video = os.path.join(d, 'processed.mp4')
+            with open(temp_video, 'wb') as f:
+                f.write(b'processed')
+            output = os.path.join(d, 'output.mp4')
+            obj = SubtitleRemover.__new__(SubtitleRemover)
+            obj.video_path = os.path.join(d, 'input.mp4')
+            obj.video_out_path = output
+            obj.video_temp_file = SimpleNamespace(name=temp_video, close=mock.Mock())
+            obj.callbacks = ProcessingCallbacks(on_log=lambda _msg: None)
+
+            with mock.patch('core.subtitle_remover.FFmpegCLI.instance',
+                            return_value=SimpleNamespace(ffmpeg_path='ffmpeg')):
+                with mock.patch('core.subtitle_remover.merge_audio_to_video', return_value=False):
+                    with mock.patch('core.subtitle_remover.shutil.copy2',
+                                    side_effect=PermissionError('denied')):
+                        with self.assertRaises(RuntimeError):
+                            obj._merge_audio()
+            obj.video_temp_file.close.assert_called_once()
+
+    def test_successful_fallback_copy_produces_output(self):
+        with tempfile.TemporaryDirectory() as d:
+            temp_video = os.path.join(d, 'processed.mp4')
+            with open(temp_video, 'wb') as f:
+                f.write(b'processed')
+            output = os.path.join(d, 'output.mp4')
+            obj = SubtitleRemover.__new__(SubtitleRemover)
+            obj.video_path = os.path.join(d, 'input.mp4')
+            obj.video_out_path = output
+            obj.video_temp_file = SimpleNamespace(name=temp_video, close=mock.Mock())
+            obj.callbacks = ProcessingCallbacks(on_log=lambda _msg: None)
+
+            with mock.patch('core.subtitle_remover.FFmpegCLI.instance',
+                            return_value=SimpleNamespace(ffmpeg_path='ffmpeg')):
+                with mock.patch('core.subtitle_remover.merge_audio_to_video', return_value=False):
+                    obj._merge_audio()
+            with open(output, 'rb') as f:
+                self.assertEqual(f.read(), b'processed')
+            obj.video_temp_file.close.assert_called_once()
 
 
 if __name__ == '__main__':

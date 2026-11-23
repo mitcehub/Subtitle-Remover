@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from infra.config import config, tr, TRANSLATION_FILE
-from infra.utils import VIDEO_EXTENSIONS
+from infra.utils import VIDEO_EXTENSIONS, paths_refer_to_same_file
 from core.subtitle_remover import SubtitleRemover
 
 logger = logging.getLogger('cli')
@@ -33,6 +33,8 @@ def parse_args():
     # 校验输出路径目录可写
     if args.output:
         args.output = os.path.realpath(args.output)
+        if paths_refer_to_same_file(args.input, args.output):
+            parser.error('output path must not refer to the input video')
         out_dir = os.path.dirname(args.output)
         if out_dir and not os.path.isdir(out_dir):
             print(f'Error: output directory not found: {out_dir}')

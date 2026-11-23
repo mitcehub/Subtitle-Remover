@@ -1101,11 +1101,7 @@ class E2FGVIInpaint:
 
         ckpt = torch.load(model_path, map_location='cpu', weights_only=True)
         state_dict = ckpt.get('netG', ckpt)
-        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
-        if missing:
-            logger.warning('e2fgvi_model_missing_keys: %s', missing)
-        if unexpected:
-            logger.warning('e2fgvi_model_unexpected_keys: %s', unexpected)
+        self.model.load_state_dict(state_dict, strict=True)
         self.model.eval()
 
         self._use_bf16 = False

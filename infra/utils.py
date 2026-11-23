@@ -21,6 +21,20 @@ def get_readable_path(path):
     return buf.value if ret != 0 else path
 
 
+def paths_refer_to_same_file(path_a, path_b):
+    """Return whether two paths identify the same file, including symlinks/hardlinks."""
+    if not path_a or not path_b:
+        return False
+    path_a = os.path.realpath(os.path.abspath(path_a))
+    path_b = os.path.realpath(os.path.abspath(path_b))
+    if os.path.normcase(path_a) == os.path.normcase(path_b):
+        return True
+    try:
+        return os.path.samefile(path_a, path_b)
+    except (OSError, ValueError):
+        return False
+
+
 def is_frame_in_sections(frame_no, sections):
     """判断帧号是否在 AB section 范围内。
     sections 为元组列表 [(start, end), ...]，半开区间 [start, end)。

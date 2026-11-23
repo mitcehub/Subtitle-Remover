@@ -37,6 +37,8 @@ python gui.py
 ```
 
 > The simplest option is still to download the prebuilt archive and run it directly, with no environment setup.
+> For source deployments, Windows uses the bundled FFmpeg. On macOS / Linux, install FFmpeg
+> separately and ensure it is available on `PATH` with the `libx264` encoder enabled.
 
 ## FAQ
 

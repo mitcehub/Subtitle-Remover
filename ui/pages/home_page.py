@@ -664,21 +664,26 @@ class HomePage(QWidget):
 
     @staticmethod
     def _safe_output_path(save_dir, stem, ext):
-        """生成不覆盖已有文件、且不跟随符号链接的输出路径（修复 CWE-59）。
+        """原子预留一个新的输出路径，避免覆盖现有文件或符号链接。
 
-        若目标文件已存在或是符号链接，则追加 _1 / _2 ... 直到找到可用路径，
-        避免覆盖用户已有文件，更避免通过符号链接写到意外位置。
+        使用 O_EXCL 创建占位文件，避免“先检查、后创建”之间的竞态。
+        FFmpeg 随后会写入该预留路径；如果任务失败，调用方负责清理残留文件。
         """
-        base = os.path.abspath(os.path.join(save_dir, f'{stem}_no_sub{ext}'))
-        candidate = base
+        os.makedirs(save_dir, exist_ok=True)
         idx = 1
-        while os.path.islink(candidate) or os.path.exists(candidate):
-            candidate = os.path.abspath(
-                os.path.join(save_dir, f'{stem}_no_sub_{idx}{ext}'))
-            idx += 1
-        if candidate != base:
-            logger.info('output_path_avoided_existing: %s -> %s', base, candidate)
-        return candidate
+        while True:
+            name = f'{stem}_no_sub{ext}' if idx == 1 else f'{stem}_no_sub_{idx - 1}{ext}'
+            candidate = os.path.abspath(os.path.join(save_dir, name))
+            try:
+                fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                idx += 1
+                continue
+            os.close(fd)
+            if idx > 1:
+                logger.info('output_path_avoided_existing: %s -> %s',
+                            os.path.join(save_dir, f'{stem}_no_sub{ext}'), candidate)
+            return candidate
 
     def run_button_clicked(self):
         logger.info('run_button_clicked')
@@ -748,21 +753,29 @@ class HomePage(QWidget):
             stem = Path(self.video_path).stem
             ext = Path(self.video_path).suffix
             self.output_path = self._safe_output_path(save_dir, stem, ext)
+            task_output_path = self.output_path
 
             def task():
+                output_succeeded = False
                 try:
                     with self._video_cap_lock:
                         if self.video_cap:
                             self.video_cap.release()
                             self.video_cap = None
 
-                    process = self.run_subtitle_remover_process(self.video_path, self.output_path, options)
+                    process = self.run_subtitle_remover_process(
+                        self.video_path, task_output_path, options)
 
                     if self._stop_event.is_set():
                         return
 
                     # 处理完成
-                    if process.exitcode == 0:
+                    output_succeeded = (
+                        process.exitcode == 0
+                        and os.path.isfile(task_output_path)
+                        and os.path.getsize(task_output_path) > 0
+                    )
+                    if output_succeeded:
                         self.progress_signal.emit(100, True)
                     else:
                         self.append_log_signal.emit([
@@ -772,6 +785,13 @@ class HomePage(QWidget):
                     logger.error('processing_task_error: %s', traceback.format_exc())
                     self.append_log_signal.emit([f"Error: {e}"])
                 finally:
+                    if not output_succeeded and task_output_path:
+                        try:
+                            if os.path.isfile(task_output_path) or os.path.islink(task_output_path):
+                                os.remove(task_output_path)
+                        except OSError:
+                            logger.warning('failed_output_cleanup_failed: %s',
+                                           task_output_path, exc_info=True)
                     # 只有当前任务才能恢复 UI，避免旧任务干扰新任务
                     if generation == self._task_generation:
                         self.toggle_buttons_signal.emit(True)
@@ -780,6 +800,13 @@ class HomePage(QWidget):
             self._worker_thread.start()
         except Exception as e:
             logger.error('thread_start_error: %s', traceback.format_exc())
+            if self.output_path:
+                try:
+                    if os.path.isfile(self.output_path) or os.path.islink(self.output_path):
+                        os.remove(self.output_path)
+                except OSError:
+                    logger.warning('failed_output_cleanup_failed: %s',
+                                   self.output_path, exc_info=True)
             self.append_log_signal.emit([f"Error: {e}"])
             self.toggle_buttons_signal.emit(True)
 

@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from infra.config import config, tr, MODEL_PATH, InpaintMode, resolve_model_path
 from infra.hardware import HardwareAccelerator
-from infra.utils import get_readable_path
+from infra.utils import get_readable_path, paths_refer_to_same_file
 from core.inpaint.sttn import STTNAutoInpaint
 from core.inpaint.e2fgvi import E2FGVIAutoInpaint
 from core.inpaint.propainter import ProPainterAutoInpaint
@@ -118,6 +118,9 @@ class SubtitleRemover:
         self.progress_total = 0
         tbar = tqdm(total=self.frame_count, unit='frame', position=0, file=sys.__stdout__, desc='Subtitle Removing')
         try:
+            if paths_refer_to_same_file(self.video_path, self.video_out_path):
+                raise ValueError('输出路径不能指向输入视频，以免覆盖原文件')
+
             self._log_model()
             self._process_video(tbar)
 
@@ -200,18 +203,26 @@ class SubtitleRemover:
         self._emit_log(tr['Main']['SubtitleRemoverModel'].format(f"{model_name} ({device})"))
 
     def _merge_audio(self):
-        self.is_successful_merged = merge_audio_to_video(
-            self.video_path, self.video_temp_file.name, self.video_out_path,
-            FFmpegCLI.instance().ffmpeg_path
-        )
-        if not self.is_successful_merged:
-            self._emit_log(f'音频合并失败，已输出无音频视频: {self.video_out_path}')
-            logger.error('audio_merge_failed_fallback_copy: out=%s', self.video_out_path)
-            try:
-                shutil.copy2(self.video_temp_file.name, self.video_out_path)
-            except IOError as e:
-                self._emit_log(tr['Main']['CopyFileFailed'].format(self.video_temp_file.name, self.video_out_path, str(e)))
-        self.video_temp_file.close()
+        try:
+            self.is_successful_merged = merge_audio_to_video(
+                self.video_path, self.video_temp_file.name, self.video_out_path,
+                FFmpegCLI.instance().ffmpeg_path
+            )
+            if not self.is_successful_merged:
+                self._emit_log(f'音频合并失败，尝试输出无音频视频: {self.video_out_path}')
+                logger.error('audio_merge_failed_fallback_copy: out=%s', self.video_out_path)
+                try:
+                    shutil.copy2(self.video_temp_file.name, self.video_out_path)
+                except OSError as e:
+                    self._emit_log(tr['Main']['CopyFileFailed'].format(
+                        self.video_temp_file.name, self.video_out_path, str(e)))
+                    raise RuntimeError(
+                        f'音频合并与无音频备用输出均失败: {self.video_out_path}') from e
+
+            if not os.path.isfile(self.video_out_path) or os.path.getsize(self.video_out_path) <= 0:
+                raise RuntimeError(f'处理未生成有效输出文件: {self.video_out_path}')
+        finally:
+            self.video_temp_file.close()
 
     def _cleanup(self, success=False):
         try:
