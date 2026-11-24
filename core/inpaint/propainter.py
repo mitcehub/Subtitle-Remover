@@ -30,7 +30,7 @@ import torchvision
 from tqdm import tqdm
 
 from infra.config import config
-from infra.utils import get_model_output_stem
+from infra.utils import get_model_output_stem, get_readable_path
 from core.inpaint.region import get_inpaint_area_by_mask, get_tight_inpaint_area
 from core.video_io.ffmpeg import FFmpegCLI
 from core.video_io.video_reader import create_video_capture
@@ -1453,8 +1453,85 @@ def _iter_video_chunks(total, chunk_frames, overlap):
         yield core_start, core_end, context_start, context_end
 
 
-def _seek_video_capture(cap, frame_index):
-    """Seek a fresh VideoCapture to an exact frame, with a sequential fallback."""
+def _load_frame_times(video_path, total):
+    """扫描 packet 生成逐帧显示时间（毫秒，相对流起点），失败返回 None。
+
+    只解包不解码（1845 帧约 0.03 秒）。VFR / 手机 HEVC 的帧间隔并不均匀，
+    OpenCV 按「帧号 ÷ 平均 fps」换算时间定位会静默落到目标之后的帧，
+    因此逐帧 PTS 是按帧号精确定位的唯一可靠依据。
+    """
+    try:
+        import av
+    except ImportError:
+        logger.warning('propainter_frame_times_skip: PyAV 未安装，回退帧号定位')
+        return None
+    try:
+        with av.open(get_readable_path(video_path) or video_path) as container:
+            stream = container.streams.video[0]
+            time_base = stream.time_base
+            start_time = stream.start_time or 0
+            times = [
+                float((packet.pts - start_time) * time_base) * 1000.0
+                for packet in container.demux(stream)
+                if packet.pts is not None
+            ]
+    except Exception:
+        logger.warning('propainter_frame_times_failed', exc_info=True)
+        return None
+    if len(times) != total:
+        logger.warning('propainter_frame_times_mismatch: pts=%d, total=%d',
+                       len(times), total)
+        return None
+    times = np.sort(np.asarray(times, dtype=np.float64))
+    if np.any(np.diff(times) <= 0):
+        logger.warning('propainter_frame_times_not_monotonic')
+        return None
+    logger.info('propainter_frame_times_loaded: frames=%d', len(times))
+    return times
+
+
+def _frame_step(frame_times, frame_index):
+    """估算第 frame_index 帧附近的帧间隔（毫秒）。"""
+    if frame_index > 0:
+        step = float(frame_times[frame_index] - frame_times[frame_index - 1])
+    elif len(frame_times) > 1:
+        step = float(frame_times[1] - frame_times[0])
+    else:
+        step = 1.0
+    return max(step, 0.001)
+
+
+def _seek_by_timestamp(cap, frame_index, frame_times):
+    """按精确 PTS 定位，返回已解码的目标帧列表；后端不回报真实时间戳时返回 None。"""
+    target = float(frame_times[frame_index])
+    step = _frame_step(frame_times, frame_index)
+    for attempt in range(3):
+        # 目标时间略微提前，保证落在目标帧之前，再靠时间戳反馈逐帧前进
+        seek_ms = max(0.0, target - step * (1.5 + 3 * attempt))
+        cap.set(cv2.CAP_PROP_POS_MSEC, seek_ms)
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            pts = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+            if pts <= 0.0 and seek_ms > 0.0:
+                return None  # 后端不回报已解码帧的真实时间戳，交回帧号定位
+            if pts < target - 0.5:
+                continue
+            if pts > target + 0.5:
+                break  # 定位过头，提前重试
+            return [frame]
+        logger.warning('propainter_ts_seek_retry: frame=%d, attempt=%d',
+                       frame_index, attempt + 1)
+    raise RuntimeError(f'无法按时间戳定位到视频帧 {frame_index}')
+
+
+def _seek_by_frame_index(cap, frame_index):
+    """按帧号 seek（后端不提供真实时间戳时的回退路径）。
+
+    注意：该路径在帧时间戳不均匀的视频上会落到目标之后的帧，
+    且 CAP_PROP_POS_FRAMES 仍回报请求值，位置校验无法察觉。
+    """
     if frame_index <= 0:
         return
     if cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index):
@@ -1472,6 +1549,18 @@ def _seek_video_capture(cap, frame_index):
         ok, _ = cap.read()
         if not ok:
             raise RuntimeError(f'无法定位到视频帧 {frame_index}')
+
+
+def _seek_video_capture(cap, frame_index, frame_times=None):
+    """把 cap 精确定位到 frame_index，返回定位时已解码的帧（首帧即目标帧）。"""
+    if frame_index <= 0:
+        return []
+    if frame_times is not None and frame_index < len(frame_times):
+        leading = _seek_by_timestamp(cap, frame_index, frame_times)
+        if leading is not None:
+            return leading
+    _seek_by_frame_index(cap, frame_index)
+    return []
 
 
 def _release_reference_cache(ref_mm, ref_path):
@@ -1523,7 +1612,8 @@ class ProPainterAutoInpaint:
                     return 0, y1, W, y2
         return 0, 0, W, H
 
-    def _build_index_and_refs(self, crop_box, frame_start, frame_end):
+    def _build_index_and_refs(self, crop_box, frame_start, frame_end,
+                              frame_times=None):
         """顺序解码一个处理块，生成灰度索引与块级参考帧缓存。"""
         x1, y1, x2, y2 = crop_box
         ref_size = (MODEL_W, MODEL_H)
@@ -1537,15 +1627,18 @@ class ProPainterAutoInpaint:
         ref_path = None
         thumbs = []
         try:
-            _seek_video_capture(cap, frame_start)
+            leading = _seek_video_capture(cap, frame_start, frame_times)
 
             fd, ref_path = tempfile.mkstemp(prefix='pp_refs_', suffix='.dat')
             os.close(fd)
             with open(ref_path, 'wb') as fh:
                 for _ in range(frame_start, frame_end):
-                    ok, frame = cap.read()
-                    if not ok:
-                        break
+                    if leading:
+                        frame = leading.pop(0)
+                    else:
+                        ok, frame = cap.read()
+                        if not ok:
+                            break
                     rgb = cv2.cvtColor(
                         cv2.resize(frame[y1:y2, x1:x2], ref_size,
                                    interpolation=cv2.INTER_LINEAR),
@@ -1581,7 +1674,7 @@ class ProPainterAutoInpaint:
     def _process_chunk(self, writer, index, ref_mm, ref_size, crop_box,
                        video_total, sections, local, ref_frames, stride,
                        core_start, core_end, context_start, context_end,
-                       input_sub_remover, tbar, gui_mode):
+                       input_sub_remover, tbar, gui_mode, frame_times=None):
         """Process one context window and emit only its non-overlapping core."""
         x1, y1, x2, y2 = crop_box
         crop_w, crop_h = x2 - x1, y2 - y1
@@ -1600,9 +1693,11 @@ class ProPainterAutoInpaint:
 
         cap = create_video_capture(self.video_path)
         try:
-            _seek_video_capture(cap, context_start)
-            pending = {}
-            read_pos = context_start
+            leading = _seek_video_capture(cap, context_start, frame_times)
+            pending = {
+                context_start + offset: frame
+                for offset, frame in enumerate(leading)}
+            read_pos = context_start + len(leading)
 
             def fill(upto):
                 nonlocal read_pos
@@ -1728,10 +1823,11 @@ class ProPainterAutoInpaint:
                     write_index += 1
 
                 if wi % 20 == 0 or wi >= n_starts:
-                    tqdm.write(
-                        f'Processing: {group[0] + 1} - '
-                        f'{group[-1] + l_t} / Total: {video_total} '
-                        f'(chunk {core_start + 1}-{core_end}, stride {stride})')
+                    logger.info(
+                        'propainter_chunk_progress: frames=%d-%d total=%d '
+                        'chunk=%d-%d stride=%d',
+                        group[0] + 1, group[-1] + l_t, video_total,
+                        core_start + 1, core_end, stride)
 
                 if wi % GC_INTERVAL == 0:
                     gc.collect()
@@ -1790,6 +1886,9 @@ class ProPainterAutoInpaint:
             chunk_frames = config.propainterChunkFrames.value
             chunks = _iter_video_chunks(total, chunk_frames, local - 1)
             chunk_count = (total + chunk_frames - 1) // chunk_frames
+            # 多分块才需要跳读；单块视频从 0 顺序解码，无需时间戳表
+            frame_times = _load_frame_times(self.video_path, total) \
+                if chunk_count > 1 else None
             logger.info('propainter_auto: total=%d, chunks=%d, chunk_frames=%d, '
                         'sections=%d, local=%d, ref=%d, stride=%d',
                         total, chunk_count, chunk_frames, len(sections), local,
@@ -1798,7 +1897,7 @@ class ProPainterAutoInpaint:
             for (core_start, core_end,
                  context_start, context_end) in chunks:
                 index, ref_mm, ref_path, ref_size = self._build_index_and_refs(
-                    crop_box, context_start, context_end)
+                    crop_box, context_start, context_end, frame_times)
                 try:
                     logger.info('propainter_chunk_start: core=%d:%d, context=%d:%d, '
                                 'cache_frames=%d',
@@ -1808,7 +1907,7 @@ class ProPainterAutoInpaint:
                         writer, index, ref_mm, ref_size, crop_box,
                         total, sections, local, ref_frames, stride,
                         core_start, core_end, context_start, context_end,
-                        input_sub_remover, tbar, gui_mode)
+                        input_sub_remover, tbar, gui_mode, frame_times)
                 finally:
                     _release_reference_cache(ref_mm, ref_path)
                     ref_mm = ref_path = None
