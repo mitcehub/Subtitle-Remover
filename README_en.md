@@ -35,6 +35,9 @@ Once the environment is ready, launch the GUI:
 python gui.py
 ```
 
+On Windows, run `pythonw.exe gui.py` to start without a console window.
+For development or troubleshooting, run `python gui.py` from a terminal.
+
 > The simplest option is still to download the prebuilt archive and run it directly, with no environment setup.
 > For source deployments, Windows uses the bundled FFmpeg. On macOS / Linux, install FFmpeg
 > separately and ensure it is available on `PATH` with the `libx264` encoder enabled.

@@ -4,7 +4,10 @@
 """
 
 import io
+import logging
 import os
+import queue
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,7 +15,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+from PyQt6.QtCore import QMimeData, QUrl
 
+from app.pipeline import _UIProcessingLogHandler
+from app.subtitle_remover_remote_call import Command
 from core.cli import parse_args
 from core.subtitle_remover import ProcessingCallbacks, SubtitleRemover
 from core.inpaint.region import create_mask
@@ -24,8 +30,13 @@ from core.inpaint.propainter import (
     _select_reference_indices,
     ProPainterAutoInpaint,
 )
-from infra.utils import get_inpaint_output_name, paths_refer_to_same_file
+from infra.utils import (
+    get_inpaint_output_name,
+    paths_refer_to_same_file,
+    subprocess_no_console_kwargs,
+)
 from ui.coordinate_mapper import CoordinateMapper
+from ui.main_window import MainWindow
 from ui.preview_decoder import PreviewDecoder
 from ui.pages.home_page import HomePage
 
@@ -340,6 +351,29 @@ class TestInputOutputPathSafety(unittest.TestCase):
             self.assertEqual(exc.exception.code, 2)
 
 
+class TestVideoDragDrop(unittest.TestCase):
+    def test_local_video_url_is_accepted(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'clip.mp4')
+            with open(path, 'wb'):
+                pass
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(path)])
+
+            self.assertEqual(
+                MainWindow._dropped_video_path(mime), os.path.normpath(path))
+
+    def test_non_video_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'notes.txt')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('not a video')
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(path)])
+
+            self.assertIsNone(MainWindow._dropped_video_path(mime))
+
+
 class TestAudioMergeFallback(unittest.TestCase):
     def test_failed_fallback_copy_raises(self):
         with tempfile.TemporaryDirectory() as d:
@@ -410,6 +444,42 @@ class TestProcessingCallbackThrottling(unittest.TestCase):
             obj.update_progress(bar, 1)
 
         self.assertEqual(obj.callbacks.on_progress.call_count, 2)
+
+
+class TestUILogForwarding(unittest.TestCase):
+    def test_processing_info_and_warnings_are_forwarded(self):
+        messages = queue.Queue()
+        handler = _UIProcessingLogHandler(messages)
+        record = logging.LogRecord(
+            'core.inpaint.propainter', logging.INFO, '', 0,
+            'chunk complete', (), None)
+
+        handler.emit(record)
+
+        command, args = messages.get_nowait()
+        self.assertEqual(command, Command.LOG)
+        self.assertIn('chunk complete', args[0][0])
+
+    def test_output_callback_log_is_not_duplicated(self):
+        messages = queue.Queue()
+        handler = _UIProcessingLogHandler(messages)
+        record = logging.LogRecord(
+            'core.subtitle_remover', logging.INFO, '', 0,
+            '[output] already sent by callback', (), None)
+
+        handler.emit(record)
+
+        self.assertTrue(messages.empty())
+
+
+class TestSubprocessConsolePolicy(unittest.TestCase):
+    def test_windows_gui_children_use_no_console_flag(self):
+        options = subprocess_no_console_kwargs()
+        if os.name == 'nt':
+            self.assertEqual(
+                options.get('creationflags'), subprocess.CREATE_NO_WINDOW)
+        else:
+            self.assertEqual(options, {})
 
 
 if __name__ == '__main__':

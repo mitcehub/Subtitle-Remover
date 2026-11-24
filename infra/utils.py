@@ -30,6 +30,14 @@ def get_model_output_stem(stem, mode):
     return f'{stem}_{get_inpaint_output_name(mode)}_no_sub'
 
 
+def subprocess_no_console_kwargs():
+    """Hide Windows console windows spawned by GUI subprocesses."""
+    if os.name == 'nt':
+        import subprocess
+        return {'creationflags': subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def get_readable_path(path):
     if sys.platform != 'win32':
         return path

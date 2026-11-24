@@ -506,7 +506,8 @@ class STTNAutoInpaint:
                 return True
 
             for chunk_idx, (start_f, end_f) in enumerate(chunk_ranges):
-                tqdm.write(f'Processing: {start_f + 1} - {end_f} / Total: {frame_info["len"]}')
+                logger.info('sttn_chunk_progress: frames=%d-%d total=%d',
+                            start_f + 1, end_f, frame_info['len'])
 
                 if not write_original_until(start_f):
                     end_of_stream = True

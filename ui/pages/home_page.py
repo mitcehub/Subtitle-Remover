@@ -23,7 +23,6 @@ from ui.widgets.field import ComboBoxField, SwitchField
 from ui.widgets.log_view import LogView
 from ui.widgets import icons
 from ui.playback_controller import PlaybackController
-from app.pipeline import ProcessingPipeline
 from infra.config import config, tr
 from infra.process_manager import ProcessManager
 from infra.utils import get_readable_path, get_model_output_stem
@@ -82,7 +81,8 @@ class HomePage(QWidget):
 
         self.__init_widgets()
         self._playback = PlaybackController(self)
-        self._pipeline = ProcessingPipeline()
+        # Load torch/model orchestration only when the user starts processing.
+        self._pipeline = None
         self.progress_signal.connect(self.update_progress)
         self.append_log_signal.connect(self.append_log)
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
@@ -872,6 +872,9 @@ class HomePage(QWidget):
     # ==================== 子进程处理 ====================
 
     def run_subtitle_remover_process(self, video_path, output_path, options):
+        if self._pipeline is None:
+            from app.pipeline import ProcessingPipeline
+            self._pipeline = ProcessingPipeline()
         callbacks = types.SimpleNamespace(
             on_progress=self.progress_signal.emit,
             on_log=self.append_log_signal.emit,
@@ -978,11 +981,14 @@ class HomePage(QWidget):
             return
         timestamp = datetime.now().strftime('%H:%M:%S')
         escaped = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        if '错误' in text or 'Error' in text or '失败' in text or 'Failed' in text:
+        level_text = text.upper()
+        if ('错误' in text or 'ERROR' in level_text or '失败' in text
+                or 'FAILED' in level_text):
             color = '#E5534B'
-        elif '成功' in text or '完成' in text or 'Success' in text or 'Finished' in text:
+        elif ('成功' in text or '完成' in text or 'SUCCESS' in level_text
+              or 'FINISHED' in level_text):
             color = '#35C27B'
-        elif '警告' in text or 'Warning' in text:
+        elif '警告' in text or 'WARNING' in level_text:
             color = '#E8A33D'
         else:
             color = '#9AA6B8'

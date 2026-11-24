@@ -6,13 +6,14 @@ import subprocess
 import threading
 import logging
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow,
                              QStackedWidget, QVBoxLayout, QWidget)
 
 from infra.config import config, tr, BASE_DIR, VERSION
 from infra.process_manager import ProcessManager
+from infra.utils import VIDEO_EXTENSIONS, subprocess_no_console_kwargs
 from ui.pages.home_page import HomePage
 from ui.pages.settings_page import SettingsPage
 from ui.theme import tokens
@@ -68,6 +69,11 @@ class MainWindow(QMainWindow):
 
         self.home_page.hardware_changed.connect(self._refresh_hardware_label)
 
+        self._drop_targets = [self, *self.findChildren(QWidget)]
+        for widget in self._drop_targets:
+            widget.setAcceptDrops(True)
+            widget.installEventFilter(self)
+
         self._setup_hardware_badge()
 
     # ---- 导航 ----
@@ -92,6 +98,44 @@ class MainWindow(QMainWindow):
     def _switch_page(self, index):
         self.stack.setCurrentIndex(index)
 
+    @staticmethod
+    def _dropped_video_path(mime_data):
+        if not mime_data.hasUrls():
+            return None
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            path = os.path.normpath(url.toLocalFile())
+            if (os.path.isfile(path)
+                    and os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS):
+                return path
+        return None
+
+    def eventFilter(self, watched, event):
+        if event.type() in (
+                QEvent.Type.DragEnter,
+                QEvent.Type.DragMove,
+                QEvent.Type.Drop):
+            path = self._dropped_video_path(event.mimeData())
+            if path:
+                if event.type() == QEvent.Type.Drop:
+                    self._switch_page(0)
+                    self.home_btn.setChecked(True)
+                    self.settings_btn.setChecked(False)
+                    try:
+                        loaded = self.home_page.load_video(path)
+                    except Exception:
+                        logger.exception('drag_drop_video_open_failed: %s', path)
+                        loaded = False
+                    message = (
+                        tr['SubtitleExtractorGUI']['OpenVideoSuccess']
+                        if loaded else tr['SubtitleExtractorGUI']['OpenVideoFailed']
+                    ).format(path)
+                    self.home_page.append_output(message)
+                event.acceptProposedAction()
+                return True
+        return super().eventFilter(watched, event)
+
     # ---- 硬件信息（显示在原生标题栏） ----
 
     def _build_title(self):
@@ -107,56 +151,54 @@ class MainWindow(QMainWindow):
     def _setup_hardware_badge(self):
         self._hw_query_running = False
         self._hw_label_ready.connect(self._apply_hw_text)
-        self._refresh_hardware_label()
 
         self._hw_refresh_timer = QTimer(self)
         self._hw_refresh_timer.setInterval(2000)
         self._hw_refresh_timer.timeout.connect(self._refresh_hardware_label)
         self._hw_refresh_timer.start()
+        # Let the window paint before starting the background torch/GPU import.
+        QTimer.singleShot(500, self._refresh_hardware_label)
 
     def _refresh_hardware_label(self):
         """刷新硬件信息文本（读取当前配置 + 实际硬件）。
 
-        nvidia-smi / torch 查询放到后台线程，避免阻塞 GUI 事件循环。
+        GPU 检测与 PyTorch 导入放到后台线程，避免拖慢窗口启动。
         """
-        from infra.hardware import HardwareAccelerator
-
-        hw = HardwareAccelerator.instance()
-
         if not config.hardwareAcceleration.value:
             self._apply_hw_text("CPU（GPU 加速已关闭）")
             return
-        if hw.has_cuda():
-            if self._hw_query_running:
-                return
-            self._hw_query_running = True
-            threading.Thread(target=self._query_hardware_async, daemon=True).start()
+        if self._hw_query_running:
             return
-        if hw.has_mps():
-            text = "MPS (Apple GPU)"
-        elif hw.has_accelerator():
-            text = hw.accelerator_name
-        else:
-            text = "CPU（无 GPU 加速器）"
-        self._apply_hw_text(text)
+        self._hw_query_running = True
+        threading.Thread(target=self._query_hardware_async, daemon=True).start()
 
     def _query_hardware_async(self):
         """后台线程：查询系统级显存占用并通过信号回传主线程。"""
         try:
-            gpu_name, vram_text = self._query_nvidia_smi()
-            if gpu_name and vram_text:
-                text = f"GPU: {gpu_name}  |  VRAM: {vram_text}"
+            from infra.hardware import HardwareAccelerator
+
+            hw = HardwareAccelerator.instance()
+            if hw.has_cuda():
+                gpu_name, vram_text = self._query_nvidia_smi()
+                if gpu_name and vram_text:
+                    text = f"GPU: {gpu_name}  |  VRAM: {vram_text}"
+                else:
+                    try:
+                        import torch
+                        gpu_name = torch.cuda.get_device_name(0)
+                        free_b, total_b = torch.cuda.mem_get_info()
+                        used_gb = (total_b - free_b) / (1024 ** 3)
+                        total_gb = total_b / (1024 ** 3)
+                        text = (f"GPU: {gpu_name}  |  VRAM: "
+                                f"{used_gb:.1f}GB / {total_gb:.1f}GB")
+                    except Exception:
+                        text = "GPU (CUDA)"
+            elif hw.has_mps():
+                text = "MPS (Apple GPU)"
+            elif hw.has_accelerator():
+                text = hw.accelerator_name
             else:
-                # nvidia-smi 不可用时回退到 torch（只看主进程 context）
-                try:
-                    import torch
-                    gpu_name = torch.cuda.get_device_name(0)
-                    free_b, total_b = torch.cuda.mem_get_info()
-                    used_gb = (total_b - free_b) / (1024 ** 3)
-                    total_gb = total_b / (1024 ** 3)
-                    text = f"GPU: {gpu_name}  |  VRAM: {used_gb:.1f}GB / {total_gb:.1f}GB"
-                except Exception:
-                    text = "GPU (CUDA)"
+                text = "CPU（无 GPU 加速器）"
             self._hw_label_ready.emit(text)
         except Exception:
             # 退出时控件可能已销毁，忽略即可
@@ -174,7 +216,8 @@ class MainWindow(QMainWindow):
                 [nvidia_smi,
                  '--query-gpu=name,memory.used,memory.total',
                  '--format=csv,noheader,nounits'],
-                capture_output=True, timeout=3, text=True
+                capture_output=True, timeout=3, text=True,
+                **subprocess_no_console_kwargs()
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return None, None

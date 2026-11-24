@@ -7,6 +7,7 @@ import logging
 import atexit
 import subprocess
 import concurrent.futures
+from infra.utils import subprocess_no_console_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +91,11 @@ class ProcessManager:
         try:
             if platform.system() == 'Windows':
                 subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3,
+                    **subprocess_no_console_kwargs())
             else:
                 subprocess.run(['kill', '-9', str(pid)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3,
+                    **subprocess_no_console_kwargs())
         except Exception as e:
             logger.warning('terminate_pid_error: pid=%s, %s', pid, e)

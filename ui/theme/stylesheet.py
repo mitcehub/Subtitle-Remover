@@ -187,6 +187,7 @@ QTextEdit#LogView {
     border-radius: $RADIUS_SM;
     padding: 6px;
     color: $TEXT_SECONDARY;
+    font-size: 10px;
     selection-background-color: $ACCENT_SOFT;
 }
 

@@ -7,6 +7,7 @@ import logging
 import numpy as np
 
 from .ffmpeg import FFmpegCLI
+from infra.utils import subprocess_no_console_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class FFmpegVideoWriter:
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            **subprocess_no_console_kwargs(),
         )
         self._returncode = None
         self._frames_written = 0

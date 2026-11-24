@@ -29,7 +29,6 @@ temp/
 # Code intelligence cache
 .codegraph/
 
-# Windows launcher
+# Local Windows launchers (not distributed with the source)
 launcher.bat
-
-
+launcher.pyw

@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import traceback
 
-from infra.utils import get_readable_path
+from infra.utils import get_readable_path, subprocess_no_console_kwargs
 from infra.config import BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,9 @@ class FFmpegCLI:
         # 内置 Windows 版随压缩包分发已带可执行属性，无需借 chmod 提权。
         version_info = 'unknown'
         try:
-            result = subprocess.run([path, '-version'], capture_output=True, text=True, timeout=FFMPEG_VERSION_TIMEOUT)
+            result = subprocess.run(
+                [path, '-version'], capture_output=True, text=True,
+                timeout=FFMPEG_VERSION_TIMEOUT, **subprocess_no_console_kwargs())
             version_info = result.stdout.split('\n')[0] if result.stdout else 'unknown'
         except Exception as e:
             logger.warning('ffmpeg_version_check_failed: %s', e)
@@ -78,7 +80,8 @@ class FFmpegCLI:
             _validate_path(safe_path)
             result = subprocess.run(
                 [self.ffmpeg_path, '-i', safe_path, '-map', '0:v:0', '-c', 'copy', '-f', 'null', '-'],
-                capture_output=True, timeout=FFMPEG_LONG_TIMEOUT
+                capture_output=True, timeout=FFMPEG_LONG_TIMEOUT,
+                **subprocess_no_console_kwargs()
             )
             stderr_text = result.stderr.decode('utf-8', errors='replace')
             last_frame = None
@@ -102,7 +105,8 @@ def _video_has_audio_stream(ffmpeg_path, video_path):
         # 以默认级别扫描，解析 stderr 中的 "Audio:" 行判断是否含音频流
         result = subprocess.run(
             [ffmpeg_path, "-i", video_path],
-            capture_output=True, timeout=FFMPEG_PROBE_TIMEOUT
+            capture_output=True, timeout=FFMPEG_PROBE_TIMEOUT,
+            **subprocess_no_console_kwargs()
         )
         text = result.stderr.decode('utf-8', errors='replace')
         return 'Audio:' in text
@@ -146,7 +150,9 @@ def merge_audio_to_video(video_path, video_out_path, output_path, ffmpeg_path):
     use_shell = False
     logger.info('audio_extract_start: %s', video_path)
     try:
-        subprocess.check_output(audio_extract_command, stdin=subprocess.DEVNULL, shell=use_shell, timeout=FFMPEG_LONG_TIMEOUT)
+        subprocess.check_output(
+            audio_extract_command, stdin=subprocess.DEVNULL, shell=use_shell,
+            timeout=FFMPEG_LONG_TIMEOUT, **subprocess_no_console_kwargs())
         logger.info('audio_extract_success')
     except subprocess.CalledProcessError as e:
         raw = e.stderr or b''
@@ -176,7 +182,9 @@ def merge_audio_to_video(video_path, video_out_path, output_path, ffmpeg_path):
                                    "-acodec", "copy",
                                    "-loglevel", "error", output_path]
             try:
-                subprocess.check_output(audio_merge_command, stdin=subprocess.DEVNULL, shell=use_shell, timeout=FFMPEG_LONG_TIMEOUT)
+                subprocess.check_output(
+                    audio_merge_command, stdin=subprocess.DEVNULL, shell=use_shell,
+                    timeout=FFMPEG_LONG_TIMEOUT, **subprocess_no_console_kwargs())
                 logger.info('audio_merge_success')
                 return True
             except Exception as e:

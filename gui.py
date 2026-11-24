@@ -8,6 +8,19 @@ import os
 import logging
 import multiprocessing
 
+# pythonw starts without console streams. Keep code that expects stdout/stderr
+# (notably tqdm) safe while still writing application logs to the log file.
+_null_stream = None
+if sys.stdout is None or sys.stderr is None:
+    _null_stream = open(os.devnull, 'w', encoding='utf-8')
+    if sys.stdout is None:
+        sys.stdout = _null_stream
+    if sys.stderr is None:
+        sys.stderr = _null_stream
+if sys.__stdout__ is None:
+    sys.__stdout__ = sys.stdout
+if sys.__stderr__ is None:
+    sys.__stderr__ = sys.stderr
 from PyQt6.QtCore import Qt
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QApplication
@@ -30,10 +43,11 @@ _fmt = logging.Formatter('%(asctime)s [%(levelname)-5s] %(name)s: %(message)s', 
 _fh.setFormatter(_fmt)
 _root_logger.addHandler(_fh)
 
-_ch = logging.StreamHandler()
-_ch.setLevel(logging.WARNING)
-_ch.setFormatter(_fmt)
-_root_logger.addHandler(_ch)
+if sys.stderr is not None:
+    _ch = logging.StreamHandler(sys.stderr)
+    _ch.setLevel(logging.WARNING)
+    _ch.setFormatter(_fmt)
+    _root_logger.addHandler(_ch)
 
 # 配置 scenedetect 日志（默认被静默清空，重定向到文件）
 try:

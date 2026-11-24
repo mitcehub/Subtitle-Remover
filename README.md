@@ -36,6 +36,8 @@ Subtitle Remover 是一款基于 AI 视频修复技术的硬字幕去除工具�
 python gui.py
 ```
 
+Windows 下可用 `pythonw.exe gui.py` 无控制台启动；开发或排查问题时，可在终端运行 `python gui.py`。
+
 > 最简单的方式仍是直接下载压缩包解压运行，无需部署环境。
 > 源码运行时，Windows 使用仓库内置的 FFmpeg；macOS / Linux 需自行安装 FFmpeg，
 > 并确保其包含 `libx264` 编码器且可从 `PATH` 调用。
